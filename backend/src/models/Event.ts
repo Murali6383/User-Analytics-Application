@@ -1,0 +1,34 @@
+import { Schema, model } from 'mongoose';
+
+const eventSchema = new Schema(
+  {
+    websiteId: { type: String, required: true, index: true },
+    sessionId: { type: String, required: true, index: true },
+    eventType: {
+      type: String,
+      enum: ['page_view', 'click'],
+      required: true,
+      index: true,
+    },
+    pageUrl: { type: String, required: true, index: true },
+    timestamp: { type: Date, required: true, index: true },
+    clickX: { type: Number, min: 0 },
+    clickY: { type: Number, min: 0 },
+    viewportWidth: { type: Number, min: 0 },
+    viewportHeight: { type: Number, min: 0 },
+    documentWidth: { type: Number, min: 0 },
+    documentHeight: { type: Number, min: 0 },
+    pageTitle: { type: String, maxlength: 200 },
+    elementTag: { type: String, maxlength: 50 },
+    elementId: { type: String, maxlength: 200 },
+  },
+  {
+    timestamps: true,
+  },
+);
+
+eventSchema.index({ websiteId: 1, sessionId: 1, timestamp: 1 });
+eventSchema.index({ websiteId: 1, pageUrl: 1, eventType: 1, timestamp: -1 });
+eventSchema.index({ websiteId: 1, eventType: 1, timestamp: -1 });
+
+export const EventModel = model('Event', eventSchema);
