@@ -22,7 +22,7 @@ const eventSchema = new Schema(
     scrollX: { type: Number, min: 0 },
     scrollY: { type: Number, min: 0 },
     devicePixelRatio: { type: Number, min: 0 },
-    coordinateMode: { type: String, enum: ['document'] },
+    coordinateMode: { type: String, enum: ['document', 'viewport'] },
     pageTitle: { type: String, maxlength: 200 },
     elementTag: { type: String, maxlength: 50 },
     elementId: { type: String, maxlength: 200 },

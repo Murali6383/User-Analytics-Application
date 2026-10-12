@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getHeatmapPosition, getPreviewScale, validHeatmapClicks } from './heatmap';
+import { buildHeatmapDensity, getHeatmapPosition, getPreviewScale, validHeatmapClicks } from './heatmap';
 
 describe('heatmap coordinates', () => {
   it('maps document coordinates to percentages that scale with the preview', () => {
@@ -29,7 +29,12 @@ describe('heatmap coordinates', () => {
   it('maps page coordinates that include scroll offset onto the full-page preview', () => {
     expect(getHeatmapPosition({
       clickX: 400,
-      clickY: 1200,
+      clickY: 300,
+      coordinateMode: 'viewport',
+      scrollX: 0,
+      scrollY: 900,
+      viewportWidth: 800,
+      viewportHeight: 600,
       documentWidth: 800,
       documentHeight: 2400,
     })).toEqual({ left: '50%', top: '50%' });
@@ -52,5 +57,44 @@ describe('heatmap coordinates', () => {
       { clickX: Number.NaN, clickY: 2, documentWidth: 100, documentHeight: 100 },
       { clickX: 1, clickY: 2, documentWidth: 0, documentHeight: 100 },
     ])).toHaveLength(1);
+  });
+
+  it('groups only real coincident clicks into density without moving their dot', () => {
+    const density = buildHeatmapDensity([
+      {
+        clickX: 100,
+        clickY: 120,
+        coordinateMode: 'viewport',
+        scrollX: 0,
+        scrollY: 80,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 800,
+      },
+      {
+        clickX: 100,
+        clickY: 120,
+        coordinateMode: 'viewport',
+        scrollX: 0,
+        scrollY: 80,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 800,
+      },
+      {
+        clickX: 1000,
+        clickY: 120,
+        coordinateMode: 'viewport',
+        scrollX: 0,
+        scrollY: 80,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 800,
+      },
+    ]);
+    expect(density).toEqual([{ left: '12.5%', top: '25%', count: 2, clickX: 100, clickY: 120 }]);
   });
 });

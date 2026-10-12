@@ -6,6 +6,9 @@ export type HeatmapClick = {
   documentHeight?: number;
   viewportWidth?: number;
   viewportHeight?: number;
+  scrollX?: number;
+  scrollY?: number;
+  coordinateMode?: 'document' | 'viewport';
   normalizedX?: number;
   normalizedY?: number;
 };
@@ -13,6 +16,12 @@ export type HeatmapClick = {
 export type HeatmapPosition = {
   left: string;
   top: string;
+};
+
+export type HeatmapDensityPoint = HeatmapPosition & {
+  count: number;
+  clickX: number;
+  clickY: number;
 };
 
 export function getPreviewScale(viewportWidth: number, containerWidth: number) {
@@ -38,8 +47,20 @@ export function getHeatmapPosition(point: HeatmapClick): HeatmapPosition | null 
     return null;
   }
 
-  const width = Math.max(point.documentWidth || 0, point.viewportWidth || 0);
-  const height = Math.max(point.documentHeight || 0, point.viewportHeight || 0);
+  const documentWidth = typeof point.documentWidth === 'number' && Number.isFinite(point.documentWidth)
+    ? point.documentWidth
+    : 0;
+  const documentHeight = typeof point.documentHeight === 'number' && Number.isFinite(point.documentHeight)
+    ? point.documentHeight
+    : 0;
+  const viewportWidth = typeof point.viewportWidth === 'number' && Number.isFinite(point.viewportWidth)
+    ? point.viewportWidth
+    : 0;
+  const viewportHeight = typeof point.viewportHeight === 'number' && Number.isFinite(point.viewportHeight)
+    ? point.viewportHeight
+    : 0;
+  const width = Math.max(documentWidth, viewportWidth);
+  const height = Math.max(documentHeight, viewportHeight);
   if (
     typeof width !== 'number'
     || !Number.isFinite(width)
@@ -51,10 +72,21 @@ export function getHeatmapPosition(point: HeatmapClick): HeatmapPosition | null 
     return null;
   }
 
-  if (clickX > width || clickY > height) return null;
+  const isViewportPoint = point.coordinateMode === 'viewport';
+  if (isViewportPoint && (
+    viewportWidth <= 0
+    || viewportHeight <= 0
+    || clickX > viewportWidth
+    || clickY > viewportHeight
+    || (point.scrollX !== undefined && (!Number.isFinite(point.scrollX) || point.scrollX < 0))
+    || (point.scrollY !== undefined && (!Number.isFinite(point.scrollY) || point.scrollY < 0))
+  )) return null;
+  const pageX = clickX + (isViewportPoint ? point.scrollX || 0 : 0);
+  const pageY = clickY + (isViewportPoint ? point.scrollY || 0 : 0);
+  if (pageX > width || pageY > height) return null;
 
-  const x = (clickX / width) * 100;
-  const y = (clickY / height) * 100;
+  const x = (pageX / width) * 100;
+  const y = (pageY / height) * 100;
   if (
     !Number.isFinite(x)
     || !Number.isFinite(y)
@@ -68,6 +100,27 @@ export function getHeatmapPosition(point: HeatmapClick): HeatmapPosition | null 
     left: `${x}%`,
     top: `${y}%`,
   };
+}
+
+export function buildHeatmapDensity(points: HeatmapClick[]): HeatmapDensityPoint[] {
+  const density = new Map<string, HeatmapDensityPoint>();
+  for (const point of points) {
+    const position = getHeatmapPosition(point);
+    if (!position || typeof point.clickX !== 'number' || typeof point.clickY !== 'number') continue;
+    const key = `${position.left}:${position.top}`;
+    const existing = density.get(key);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+    density.set(key, {
+      ...position,
+      count: 1,
+      clickX: point.clickX,
+      clickY: point.clickY,
+    });
+  }
+  return Array.from(density.values());
 }
 
 export function validHeatmapClicks(points: HeatmapClick[]) {

@@ -24,7 +24,7 @@ describe('analytics API routes', () => {
       pageViews: 2,
       clicks: 2,
       uniquePages: 2,
-      clickThroughRate: 100,
+      clickThroughRate: null,
     });
     services.getTrendData.mockResolvedValue([
       { date: '2026-10-12', totalEvents: 4, pageViews: 2, clicks: 2 },
@@ -52,7 +52,7 @@ describe('analytics API routes', () => {
       pageViews: 2,
       clicks: 2,
       uniquePages: 2,
-      clickThroughRate: 100,
+      clickThroughRate: null,
       trend: [{ date: '2026-10-12', totalEvents: 4, pageViews: 2, clicks: 2 }],
     });
     expect(services.getOverview).toHaveBeenCalledWith({
@@ -125,7 +125,7 @@ describe('analytics API routes', () => {
     expect(services.getHeatmap).not.toHaveBeenCalled();
   });
 
-  it('validates and persists document-relative click metadata', async () => {
+  it('validates and persists viewport-relative click metadata and scroll offsets', async () => {
     services.createEvent.mockResolvedValue({ eventId: 'event-click' });
     await request(app)
       .post('/api/events')
@@ -145,7 +145,7 @@ describe('analytics API routes', () => {
         scrollX: 0,
         scrollY: 60,
         devicePixelRatio: 2,
-        coordinateMode: 'document',
+        coordinateMode: 'viewport',
       })
       .expect(201);
 
@@ -155,7 +155,7 @@ describe('analytics API routes', () => {
       viewportWidth: 1280,
       documentWidth: 1280,
       scrollY: 60,
-      coordinateMode: 'document',
+      coordinateMode: 'viewport',
     }));
   });
 

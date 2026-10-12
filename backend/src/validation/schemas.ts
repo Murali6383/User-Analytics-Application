@@ -30,7 +30,7 @@ export const trackingEventSchema = z
     scrollX: z.number().finite().nonnegative().optional(),
     scrollY: z.number().finite().nonnegative().optional(),
     devicePixelRatio: z.number().finite().positive().optional(),
-    coordinateMode: z.enum(['document']).optional(),
+    coordinateMode: z.enum(['document', 'viewport']).optional(),
     pageTitle: z.string().trim().max(200).optional(),
     elementTag: z.string().trim().max(50).optional(),
     elementId: z.string().trim().max(200).optional(),
@@ -44,13 +44,19 @@ export const trackingEventSchema = z
         ctx.addIssue({ code: 'custom', path: ['viewportWidth'], message: 'Positive viewport and document dimensions are required for click events' });
       }
       if (value.scrollX === undefined || value.scrollY === undefined || !value.coordinateMode) {
-        ctx.addIssue({ code: 'custom', path: ['coordinateMode'], message: 'Document coordinates and scroll offsets are required for click events' });
+        ctx.addIssue({ code: 'custom', path: ['coordinateMode'], message: 'Coordinate mode and scroll offsets are required for click events' });
       }
-      if (value.clickX !== undefined && value.documentWidth !== undefined && value.clickX > value.documentWidth) {
+      if (value.coordinateMode !== 'viewport' && value.clickX !== undefined && value.documentWidth !== undefined && value.clickX > value.documentWidth) {
         ctx.addIssue({ code: 'custom', path: ['clickX'], message: 'clickX must be within documentWidth' });
       }
-      if (value.clickY !== undefined && value.documentHeight !== undefined && value.clickY > value.documentHeight) {
+      if (value.coordinateMode !== 'viewport' && value.clickY !== undefined && value.documentHeight !== undefined && value.clickY > value.documentHeight) {
         ctx.addIssue({ code: 'custom', path: ['clickY'], message: 'clickY must be within documentHeight' });
+      }
+      if (value.coordinateMode === 'viewport' && value.clickX !== undefined && value.viewportWidth !== undefined && value.clickX > value.viewportWidth) {
+        ctx.addIssue({ code: 'custom', path: ['clickX'], message: 'clientX must be within viewportWidth' });
+      }
+      if (value.coordinateMode === 'viewport' && value.clickY !== undefined && value.viewportHeight !== undefined && value.clickY > value.viewportHeight) {
+        ctx.addIssue({ code: 'custom', path: ['clickY'], message: 'clientY must be within viewportHeight' });
       }
     }
   });

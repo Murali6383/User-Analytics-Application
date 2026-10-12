@@ -15,7 +15,7 @@ flowchart LR
 ## Features
 
 - Browser SDK tracks initial page loads, SPA history changes, browser back/forward navigation, and eligible link/button clicks.
-- Stable per-tab anonymous session IDs, Do Not Track support, sensitive URL query redaction, and document-relative click coordinates with viewport size, scroll offsets, document size, and device pixel ratio metadata.
+- Stable per-tab anonymous session IDs, Do Not Track support, sensitive URL query redaction, and viewport-relative client click coordinates with viewport size, scroll offsets, document size, and device pixel ratio metadata.
 - Event IDs with a MongoDB unique index make repeated submissions of the same event idempotent. The SDK does not automatically retry failed event POSTs.
 - MongoDB-backed overview and trend aggregations, page breakdown, date presets, searchable/sortable/paginated sessions, ordered event timelines, and per-page click heatmaps.
 - Dashboard routes are excluded from event collection. Analytics reads do not create events.
@@ -92,11 +92,11 @@ All API paths are under `/api`. Successful responses use JSON and analytics GET 
 | `GET /heatmap` | Click coordinates for a selected page; optional paired `viewportWidth` and `viewportHeight` filters |
 | `GET /health` | API and MongoDB connection status |
 
-The event payload includes `eventId` (UUID), `websiteId`, `sessionId`, `eventType` (`page_view` or `click`), absolute HTTP(S) `pageUrl`, and ISO timestamp. Click `clickX`/`clickY` are document-relative CSS pixels (`pageX`/`pageY`), not device pixels. Clicks also include `coordinateMode: "document"`, viewport and document dimensions, `scrollX`/`scrollY`, and `devicePixelRatio`. The SDK does not multiply CSS coordinates by device pixel ratio; scroll offsets are diagnostic metadata because page coordinates already include scrolling. The API rejects missing, non-finite, zero-dimension, and out-of-document click coordinates. A repeated `(websiteId, eventId)` returns success with `duplicate: true` and is not inserted again. Older clients may omit `eventId`; new integrations should always send it.
+The event payload includes `eventId` (UUID), `websiteId`, `sessionId`, `eventType` (`page_view` or `click`), absolute HTTP(S) `pageUrl`, and ISO timestamp. New SDK click `clickX`/`clickY` values are viewport-relative CSS pixels (`clientX`/`clientY`), not device pixels. Clicks also include `coordinateMode: "viewport"`, viewport and document dimensions, `scrollX`/`scrollY`, and `devicePixelRatio`. For full-page rendering the heatmap adds the captured scroll offset to the client point, then normalizes using captured document dimensions. The SDK does not multiply CSS coordinates by device pixel ratio. The API rejects missing, non-finite, zero-dimension, and out-of-viewport click coordinates. Legacy events marked `"document"` remain readable. A repeated `(websiteId, eventId)` returns success with `duplicate: true` and is not inserted again. Older clients may omit `eventId`; new integrations should always send it.
 
-The heatmap response includes only valid clicks for the selected canonical page and one viewport-size cohort (the most common cohort by default). It returns the available viewport breakdown, click and distinct-session counts, and an invalid-coordinate exclusion count. The frontend scales the live same-origin full-page preview to preserve aspect ratio and lets the user select another viewport cohort. Fragment identifiers are omitted; meaningful query parameters and their order are preserved, while sensitive query-key values are redacted consistently in both SDK and backend URL canonicalization. Trailing slashes are normalized except at the origin root.
+The heatmap response includes only valid clicks for the selected canonical page and one viewport-size cohort (the most common cohort by default). It returns the available viewport breakdown, click and distinct-session counts, and an invalid-coordinate exclusion count. The frontend scales the live same-origin full-page preview to preserve aspect ratio and lets the user select another viewport cohort. Coincident stored clicks share a density marker at their exact coordinate; marker intensity reflects only the count of stored clicks. Fragment identifiers are omitted; meaningful query parameters and their order are preserved, while sensitive query-key values are redacted consistently in both SDK and backend URL canonicalization. Trailing slashes are normalized except at the origin root.
 
-Analytics endpoints accept optional ISO-8601 `from` and `to` timestamps. The dashboard's 7- and 30-day presets use UTC day boundaries consistently across overview, page, heatmap, session, and journey queries. Sessions are distinct `(websiteId, sessionId)` pairs; unique pages are distinct `(websiteId, canonical pageUrl)` pairs within the selected date range. CTR is `clicks / pageViews * 100`, or zero when there are no page views.
+Analytics endpoints accept optional ISO-8601 `from` and `to` timestamps. The dashboard's 7- and 30-day presets use UTC day boundaries consistently across overview, page, heatmap, session, and journey queries. Sessions are distinct `(websiteId, sessionId)` pairs; unique pages are distinct `(websiteId, canonical pageUrl)` pairs within the selected date range. The application does not track impressions, so CTR is undefined and displayed as `N/A`; clicks divided by page views is not a valid click-through rate.
 
 ## Database model
 
@@ -108,10 +108,10 @@ Events are stored in MongoDB's `events` collection. Each document contains:
 | `websiteId`, `sessionId` | Analytics site and anonymous browsing session |
 | `eventType` | `page_view` or `click` |
 | `pageUrl`, `timestamp` | Canonical absolute URL and event time |
-| `clickX`, `clickY`, `coordinateMode` | Document-relative CSS-pixel point and explicit `"document"` coordinate convention |
+| `clickX`, `clickY`, `coordinateMode` | Viewport-relative `clientX`/`clientY` CSS pixels and explicit `"viewport"` convention (older records may use `"document"`) |
 | `viewportWidth`, `viewportHeight` | Browser viewport dimensions at the click; used for heatmap cohorts |
 | `documentWidth`, `documentHeight` | Page dimensions used to normalize full-page heatmap coordinates |
-| `scrollX`, `scrollY` | Scroll offsets when the click occurred; retained to explain document-relative coordinates |
+| `scrollX`, `scrollY` | Scroll offsets when the click occurred; added to client coordinates for full-page mapping |
 | `devicePixelRatio` | Device scale metadata; coordinates remain CSS pixels |
 | `elementTag` | Clicked element type; no text or form value is collected |
 
@@ -139,6 +139,6 @@ No hosted deployment is configured. To deploy, build the frontend with `npm run 
 - A session is scoped to a browser tab using `sessionStorage` with a cookie fallback. It is anonymous and is not a unique-person identity.
 - Events are append-only. The application does not delete, merge, or automatically clean historical events.
 - Existing records created before `eventId` was added are not retroactively deduplicated. To investigate possible historical duplicates, export/read-only aggregate records grouped by `websiteId`, `sessionId`, `eventType`, canonical `pageUrl`, and a narrow timestamp/coordinate window; review candidates manually before any backup-backed, explicitly approved cleanup. Identical clicks can be legitimate, so these fields cannot prove duplication.
-- Heatmaps visualize document-relative normalized points over a live page preview rendered at one selected viewport size. They are not historical screenshots; content, responsive styling, fonts, or layout changes since a click can still affect visual alignment. Viewport cohorts are kept separate, while different document heights within one viewport cohort are normalized to the current preview height.
+- Heatmaps visualize scroll-adjusted viewport coordinates over a live full-page preview rendered at one selected viewport size. They are not historical screenshots; content, responsive styling, fonts, or layout changes since a click can still affect visual alignment. Viewport cohorts are kept separate, while different document heights within one viewport cohort are normalized to the current preview height.
 - Date aggregation and date presets use UTC; displayed timestamps use the browser's local timezone.
 - `npm run dev` requires a working MongoDB service. API startup fails rather than silently switching to an in-memory or mock database.

@@ -148,8 +148,8 @@
           document.documentElement.clientHeight,
           window.innerHeight || 0,
         );
-        payload.clickX = Math.max(0, extra.pageX);
-        payload.clickY = Math.max(0, extra.pageY);
+        payload.clickX = Math.max(0, extra.clientX);
+        payload.clickY = Math.max(0, extra.clientY);
         payload.viewportWidth = Math.max(0, window.innerWidth || 0);
         payload.viewportHeight = Math.max(0, window.innerHeight || 0);
         payload.documentWidth = documentWidth;
@@ -157,7 +157,7 @@
         payload.scrollX = Math.max(0, window.scrollX || 0);
         payload.scrollY = Math.max(0, window.scrollY || 0);
         payload.devicePixelRatio = Math.max(1, window.devicePixelRatio || 1);
-        payload.coordinateMode = 'document';
+        payload.coordinateMode = 'viewport';
         payload.elementTag = extra.elementTag;
       }
 
@@ -224,8 +224,8 @@
         touchSession();
 
         const payload = buildEventPayload('click', {
-          pageX: Number.isFinite(event.pageX) ? event.pageX : event.clientX + window.scrollX,
-          pageY: Number.isFinite(event.pageY) ? event.pageY : event.clientY + window.scrollY,
+          clientX: event.clientX,
+          clientY: event.clientY,
           elementTag: element.tagName.toLowerCase(),
         });
         void sendPayload(payload);

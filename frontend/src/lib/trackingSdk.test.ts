@@ -65,8 +65,6 @@ describe('InsightTrack browser SDK', () => {
       clientX: 24,
       clientY: 36,
     });
-    Object.defineProperty(click, 'pageX', { value: 24 });
-    Object.defineProperty(click, 'pageY', { value: 156 });
     button.dispatchEvent(click);
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -76,7 +74,7 @@ describe('InsightTrack browser SDK', () => {
       eventType: 'click',
       pageUrl: `${window.location.origin}/store/products`,
       clickX: 24,
-      clickY: 156,
+      clickY: 36,
       timestamp: expect.any(String),
       viewportWidth: expect.any(Number),
       viewportHeight: expect.any(Number),
@@ -85,7 +83,23 @@ describe('InsightTrack browser SDK', () => {
       scrollX: 0,
       scrollY: 120,
       devicePixelRatio: 2,
-      coordinateMode: 'document',
+      coordinateMode: 'viewport',
+    });
+
+    const link = document.createElement('a');
+    link.href = '/store/cart';
+    link.textContent = 'Tracked link';
+    document.body.appendChild(link);
+    const linkClick = new MouseEvent('click', { bubbles: true, cancelable: true, clientX: 48, clientY: 52 });
+    linkClick.preventDefault();
+    link.dispatchEvent(linkClick);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body as string)).toMatchObject({
+      eventType: 'click',
+      clickX: 48,
+      clickY: 52,
+      coordinateMode: 'viewport',
+      scrollY: 120,
     });
 
     window.history.pushState({}, '', '/dashboard/sessions');
@@ -95,7 +109,7 @@ describe('InsightTrack browser SDK', () => {
     document.body.appendChild(refreshButton);
     refreshButton.click();
     await new Promise((resolveTick) => window.setTimeout(resolveTick, 0));
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
 
     const returnToProducts = new Promise<void>((resolvePop) => {
       window.addEventListener('popstate', () => resolvePop(), { once: true });
@@ -104,8 +118,8 @@ describe('InsightTrack browser SDK', () => {
     await returnToProducts;
     await new Promise((resolveTick) => window.setTimeout(resolveTick, 0));
     expect(window.location.pathname).toBe('/store/products');
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(JSON.parse(fetchMock.mock.calls[3][1].body as string)).toMatchObject({
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(JSON.parse(fetchMock.mock.calls[4][1].body as string)).toMatchObject({
       eventType: 'page_view',
       pageUrl: `${window.location.origin}/store/products`,
     });

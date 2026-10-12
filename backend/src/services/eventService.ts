@@ -20,7 +20,7 @@ type EventPayload = {
   scrollX?: number;
   scrollY?: number;
   devicePixelRatio?: number;
-  coordinateMode?: 'document';
+  coordinateMode?: 'document' | 'viewport';
   pageTitle?: string;
   elementTag?: string;
   elementId?: string;
@@ -202,22 +202,44 @@ export async function getPageAnalytics({ websiteId, from, to }: { websiteId?: st
 }
 
 function heatmapCoordinatesValidExpression() {
-  const width = { $max: [{ $ifNull: ['$documentWidth', 0] }, { $ifNull: ['$viewportWidth', 0] }] };
-  const height = { $max: [{ $ifNull: ['$documentHeight', 0] }, { $ifNull: ['$viewportHeight', 0] }] };
+  const docWidth = { $cond: [{ $isNumber: '$documentWidth' }, '$documentWidth', 0] };
+  const viewWidth = { $cond: [{ $isNumber: '$viewportWidth' }, '$viewportWidth', 0] };
+  const docHeight = { $cond: [{ $isNumber: '$documentHeight' }, '$documentHeight', 0] };
+  const viewHeight = { $cond: [{ $isNumber: '$viewportHeight' }, '$viewportHeight', 0] };
+  const clickX = { $cond: [{ $isNumber: '$clickX' }, '$clickX', 0] };
+  const clickY = { $cond: [{ $isNumber: '$clickY' }, '$clickY', 0] };
+  const scrollX = { $cond: [{ $isNumber: '$scrollX' }, '$scrollX', 0] };
+  const scrollY = { $cond: [{ $isNumber: '$scrollY' }, '$scrollY', 0] };
+  const width = { $max: [docWidth, viewWidth] };
+  const height = { $max: [docHeight, viewHeight] };
+  const viewportMode = { $eq: ['$coordinateMode', 'viewport'] };
+  const x = { $cond: [viewportMode, { $add: [clickX, scrollX] }, clickX] };
+  const y = { $cond: [viewportMode, { $add: [clickY, scrollY] }, clickY] };
   return {
     $and: [
       { $isNumber: '$clickX' },
       { $isNumber: '$clickY' },
       { $isNumber: '$viewportWidth' },
       { $isNumber: '$viewportHeight' },
-      { $gte: ['$clickX', 0] },
-      { $gte: ['$clickY', 0] },
-      { $gt: ['$viewportWidth', 0] },
-      { $gt: ['$viewportHeight', 0] },
+      { $gte: [clickX, 0] },
+      { $gte: [clickY, 0] },
+      { $gt: [viewWidth, 0] },
+      { $gt: [viewHeight, 0] },
       { $gt: [width, 0] },
       { $gt: [height, 0] },
-      { $lte: ['$clickX', width] },
-      { $lte: ['$clickY', height] },
+      { $lte: [x, width] },
+      { $lte: [y, height] },
+      {
+        $or: [
+          { $ne: ['$coordinateMode', 'viewport'] },
+          {
+            $and: [
+              { $lte: [clickX, viewWidth] },
+              { $lte: [clickY, viewHeight] },
+            ],
+          },
+        ],
+      },
     ],
   };
 }
@@ -237,7 +259,31 @@ export async function getHeatmap({ websiteId, pageUrl, from, to, limit = 200, vi
 
   const [diagnostics] = await EventModel.aggregate([
     { $match: match },
-    { $addFields: { _coordinateValid: heatmapCoordinatesValidExpression() } },
+    {
+      $addFields: {
+        _coordinateValid: heatmapCoordinatesValidExpression(),
+        _heatmapX: {
+          $cond: [
+            { $eq: ['$coordinateMode', 'viewport'] },
+            { $add: [
+              { $cond: [{ $isNumber: '$clickX' }, '$clickX', 0] },
+              { $cond: [{ $isNumber: '$scrollX' }, '$scrollX', 0] },
+            ] },
+            '$clickX',
+          ],
+        },
+        _heatmapY: {
+          $cond: [
+            { $eq: ['$coordinateMode', 'viewport'] },
+            { $add: [
+              { $cond: [{ $isNumber: '$clickY' }, '$clickY', 0] },
+              { $cond: [{ $isNumber: '$scrollY' }, '$scrollY', 0] },
+            ] },
+            '$clickY',
+          ],
+        },
+      },
+    },
     {
       $facet: {
         viewportBreakdown: [
@@ -275,8 +321,15 @@ export async function getHeatmap({ websiteId, pageUrl, from, to, limit = 200, vi
   ]);
 
   const viewportBreakdown = diagnostics?.viewportBreakdown || [];
+  const requestedViewport = viewportWidth !== undefined && viewportHeight !== undefined
+    ? viewportBreakdown.find((viewport: any) => (
+      viewport.viewportWidth === viewportWidth && viewport.viewportHeight === viewportHeight
+    ))
+    : undefined;
   const selectedViewport = viewportWidth !== undefined && viewportHeight !== undefined
-    ? { viewportWidth, viewportHeight }
+    ? requestedViewport
+      ? { viewportWidth, viewportHeight }
+      : null
     : viewportBreakdown[0]
       ? { viewportWidth: viewportBreakdown[0].viewportWidth, viewportHeight: viewportBreakdown[0].viewportHeight }
       : null;
@@ -301,6 +354,30 @@ export async function getHeatmap({ websiteId, pageUrl, from, to, limit = 200, vi
   const [selected] = await EventModel.aggregate([
     { $match: selectedMatch },
     {
+      $addFields: {
+        _heatmapX: {
+          $cond: [
+            { $eq: ['$coordinateMode', 'viewport'] },
+            { $add: [
+              { $cond: [{ $isNumber: '$clickX' }, '$clickX', 0] },
+              { $cond: [{ $isNumber: '$scrollX' }, '$scrollX', 0] },
+            ] },
+            '$clickX',
+          ],
+        },
+        _heatmapY: {
+          $cond: [
+            { $eq: ['$coordinateMode', 'viewport'] },
+            { $add: [
+              { $cond: [{ $isNumber: '$clickY' }, '$clickY', 0] },
+              { $cond: [{ $isNumber: '$scrollY' }, '$scrollY', 0] },
+            ] },
+            '$clickY',
+          ],
+        },
+      },
+    },
+    {
       $facet: {
         summary: [
           { $count: 'total' },
@@ -324,10 +401,11 @@ export async function getHeatmap({ websiteId, pageUrl, from, to, limit = 200, vi
   const normalized = (selected?.events || []).map((event: any) => {
     const documentWidth = Math.max(Number(event.documentWidth || 0), Number(event.viewportWidth || 0));
     const documentHeight = Math.max(Number(event.documentHeight || 0), Number(event.viewportHeight || 0));
+    const { _heatmapX, _heatmapY, ...storedEvent } = event;
     return {
-      ...event,
-      normalizedX: (Number(event.clickX) / documentWidth) * 100,
-      normalizedY: (Number(event.clickY) / documentHeight) * 100,
+      ...storedEvent,
+      normalizedX: (Number(_heatmapX ?? event.clickX) / documentWidth) * 100,
+      normalizedY: (Number(_heatmapY ?? event.clickY) / documentHeight) * 100,
     };
   });
 
@@ -385,11 +463,9 @@ export async function getOverview({ websiteId, from, to }: { websiteId?: string;
     totalSessions: result?.totalSessions || 0,
     uniquePages: result?.uniquePages || 0,
   };
-  const clickThroughRate = summary.pageViews > 0 ? (summary.clicks / summary.pageViews) * 100 : 0;
-
   return {
     ...summary,
-    clickThroughRate,
+    clickThroughRate: null,
   };
 }
 

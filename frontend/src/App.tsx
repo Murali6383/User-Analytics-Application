@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { API_BASE, apiFetch } from './lib/api';
-import { getHeatmapPosition, getPreviewScale, validHeatmapClicks, type HeatmapClick } from './lib/heatmap';
+import { buildHeatmapDensity, getPreviewScale, validHeatmapClicks, type HeatmapClick } from './lib/heatmap';
 import { products } from './data/products';
 
 type TrendPoint = { date: string; totalEvents: number; pageViews: number; clicks: number };
@@ -33,7 +33,7 @@ type Overview = {
   pageViews: number;
   clicks: number;
   uniquePages: number;
-  clickThroughRate: number;
+  clickThroughRate: number | null;
   trend: TrendPoint[];
 };
 type SessionSummary = {
@@ -179,6 +179,7 @@ export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; ra
   const previewUrl = new URL(pageUrl);
   previewUrl.searchParams.set('insighttrackPreview', '1');
   const validPoints = validHeatmapClicks(points);
+  const densityPoints = buildHeatmapDensity(validPoints);
   const viewportKey = selectedViewport
     ? `${selectedViewport.viewportWidth}x${selectedViewport.viewportHeight}`
     : '';
@@ -220,6 +221,9 @@ export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; ra
             skipAutomaticViewportReload.current = `${pageUrl}|${range}|${refreshToken}|${retry}|${data.selectedViewport.viewportWidth}x${data.selectedViewport.viewportHeight}`;
           }
           setSelectedViewport(data.selectedViewport);
+        } else if (selectedViewport) {
+          skipAutomaticViewportReload.current = `${pageUrl}|${range}|${refreshToken}|${retry}|`;
+          setSelectedViewport(null);
         }
       } catch (loadError) {
         if (!active) return;
@@ -358,19 +362,30 @@ export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; ra
               }}
               onError={() => setPreviewError('The selected page preview could not be loaded.')}
             />
-            {validPoints.length > 0 && (
+            {densityPoints.length > 0 && (
               <div className="pointer-events-none absolute left-0 top-0 z-10 w-full" style={{ height: previewHeight }}>
-                {validPoints.map((point, index) => {
-                  const position = getHeatmapPosition(point);
-                  if (!position) return null;
-
+                {densityPoints.map((point, index) => {
+                  const diameter = Math.min(64, 24 + Math.sqrt(point.count - 1) * 10);
+                  const style = {
+                    left: point.left,
+                    top: point.top,
+                    width: `${diameter}px`,
+                    height: `${diameter}px`,
+                    opacity: Math.min(0.9, 0.55 + Math.log2(point.count) * 0.12),
+                  };
                   return (
                     <span
-                      key={`${point._id}-${index}`}
-                      className="absolute h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-brand-500/80 shadow-lg shadow-brand-500/30"
-                      style={position}
-                      title={`document click at ${point.clickX}, ${point.clickY}px`}
-                    />
+                      key={`${point.left}-${point.top}-${index}`}
+                      className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-brand-500 shadow-lg shadow-brand-500/30"
+                      style={style}
+                      title={`${point.count} stored click${point.count === 1 ? '' : 's'} at ${point.clickX}, ${point.clickY} CSS pixels`}
+                    >
+                      {point.count > 1 && (
+                        <span className="flex h-full items-center justify-center text-[10px] font-semibold text-white">
+                          {formatNumber(point.count)}
+                        </span>
+                      )}
+                    </span>
                   );
                 })}
               </div>
@@ -397,7 +412,7 @@ export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; ra
       </div>
       {!loading && !error && (
         <div className="mt-3 space-y-1 text-xs text-slate-500">
-          <p>{formatNumber(total)} clicks across {formatNumber(sessionCount)} sessions · document coordinates · {selectedViewport ? `${selectedViewport.viewportWidth} × ${selectedViewport.viewportHeight} CSS-pixel viewport` : 'viewport not available'}</p>
+          <p>{formatNumber(total)} clicks across {formatNumber(sessionCount)} sessions · viewport client coordinates mapped to the full page · {selectedViewport ? `${selectedViewport.viewportWidth} × ${selectedViewport.viewportHeight} CSS-pixel viewport` : 'viewport not available'}</p>
           {validPoints.length < total && (
             <p>Showing the {formatNumber(validPoints.length)} most recent valid click points from this filtered total.</p>
           )}
@@ -478,7 +493,7 @@ function DashboardOverview() {
         <StatCard label="Page views" value={summary ? formatNumber(summary.pageViews) : '—'} accent="bg-emerald-50 text-emerald-700" />
         <StatCard label="Clicks" value={summary ? formatNumber(summary.clicks) : '—'} accent="bg-amber-50 text-amber-700" />
         <StatCard label="Unique pages" value={summary ? formatNumber(summary.uniquePages) : '—'} accent="bg-rose-50 text-rose-700" />
-        <StatCard label="CTR" value={summary ? `${summary.clickThroughRate.toFixed(2)}%` : '—'} accent="bg-indigo-50 text-indigo-700" />
+        <StatCard label="CTR" value={summary ? (summary.clickThroughRate === null ? 'N/A' : `${summary.clickThroughRate.toFixed(2)}%`) : '—'} accent="bg-indigo-50 text-indigo-700" />
       </div>
       {loading && !summary ? <p className="text-sm text-slate-500">Loading analytics…</p> : null}
 

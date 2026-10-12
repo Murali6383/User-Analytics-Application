@@ -41,7 +41,7 @@ describe('event analytics service', () => {
       totalSessions: 2,
       uniquePages: 2,
     });
-    expect(overview.clickThroughRate).toBeCloseTo(200 / 3);
+    expect(overview.clickThroughRate).toBeNull();
     const pipeline = eventModel.aggregate.mock.calls[0][0];
     expect(pipeline[1].$facet.sessions[0].$group._id).toEqual({
       websiteId: '$websiteId',
@@ -50,6 +50,19 @@ describe('event analytics service', () => {
     expect(pipeline[1].$facet.pages[0].$group._id).toEqual({
       websiteId: '$websiteId',
       pageUrl: '$pageUrl',
+    });
+  });
+
+  it('returns zero persisted metrics and an undefined CTR when no events exist', async () => {
+    eventModel.aggregate.mockResolvedValueOnce([]);
+
+    await expect(getOverview({ websiteId: 'demo-store' })).resolves.toEqual({
+      totalEvents: 0,
+      pageViews: 0,
+      clicks: 0,
+      totalSessions: 0,
+      uniquePages: 0,
+      clickThroughRate: null,
     });
   });
 
@@ -125,10 +138,15 @@ describe('event analytics service', () => {
         pageUrl: 'https://shop.test/products/?variant=blue',
         clickX: 720,
         clickY: 450,
+        coordinateMode: 'viewport',
+        scrollX: 0,
+        scrollY: 100,
         viewportWidth: 1440,
         viewportHeight: 900,
         documentWidth: 1440,
-        documentHeight: 900,
+        documentHeight: 1800,
+        _heatmapX: 720,
+        _heatmapY: 550,
       }],
       }]);
 
@@ -153,7 +171,13 @@ describe('event analytics service', () => {
     expect(result.selectedViewport).toEqual({ viewportWidth: 1440, viewportHeight: 900 });
     expect(result.viewportBreakdown).toHaveLength(1);
     expect(result.data).toHaveLength(1);
-    expect(result.data[0]).toMatchObject({ normalizedX: 50, normalizedY: 50 });
+    expect(result.data[0]).toMatchObject({ normalizedX: 50, normalizedY: (550 / 1800) * 100 });
+    expect(eventModel.aggregate.mock.calls[0][0][1].$addFields._heatmapY.$cond[1]).toMatchObject({
+      $add: [
+        { $cond: [{ $isNumber: '$clickY' }, '$clickY', 0] },
+        { $cond: [{ $isNumber: '$scrollY' }, '$scrollY', 0] },
+      ],
+    });
   });
 
   it('returns an empty point list when the selected page has no stored clicks', async () => {
@@ -172,6 +196,26 @@ describe('event analytics service', () => {
       sessions: 0,
       invalidCoordinates: 0,
       viewportBreakdown: [],
+      selectedViewport: null,
+    });
+  });
+
+  it('does not report a stale viewport when the active date/page filters have no clicks', async () => {
+    eventModel.aggregate.mockResolvedValueOnce([{
+      viewportBreakdown: [],
+      invalidCoordinates: [],
+    }]);
+
+    await expect(getHeatmap({
+      websiteId: 'demo-store',
+      pageUrl: 'https://shop.test/products',
+      from: '2026-10-01T00:00:00.000Z',
+      to: '2026-10-07T23:59:59.999Z',
+      viewportWidth: 1280,
+      viewportHeight: 800,
+    })).resolves.toMatchObject({
+      data: [],
+      total: 0,
       selectedViewport: null,
     });
   });

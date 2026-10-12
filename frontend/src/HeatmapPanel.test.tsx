@@ -68,4 +68,65 @@ describe('HeatmapPanel', () => {
 
     await waitFor(() => expect(screen.getByText(/Could not load heatmap: API unavailable/)).toBeInTheDocument());
   });
+
+  it('renders a real viewport click at its scroll-adjusted full-page position', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      data: [
+        {
+          _id: 'stored-click-1',
+          eventType: 'click',
+          clickX: 100,
+          clickY: 120,
+          coordinateMode: 'viewport',
+          scrollX: 0,
+          scrollY: 200,
+          viewportWidth: 800,
+          viewportHeight: 600,
+          documentWidth: 800,
+          documentHeight: 1280,
+        },
+      ],
+      total: 1,
+      sessions: 1,
+      invalidCoordinates: 0,
+      viewportBreakdown: [{ viewportWidth: 800, viewportHeight: 600, clicks: 1, sessions: 1 }],
+      selectedViewport: { viewportWidth: 800, viewportHeight: 600 },
+    });
+
+    render(<HeatmapPanel refreshToken={0} range="all" />);
+
+    const dot = await screen.findByTitle('1 stored click at 100, 120 CSS pixels');
+    expect(dot).toHaveStyle({ left: '12.5%', top: '25%' });
+    expect(screen.getByText(/800 × 600 CSS-pixel viewport/)).toBeInTheDocument();
+  });
+
+  it('clears the viewport cohort when the active date range has no matching clicks', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        data: [],
+        total: 3,
+        sessions: 2,
+        invalidCoordinates: 0,
+        viewportBreakdown: [{ viewportWidth: 1280, viewportHeight: 800, clicks: 3, sessions: 2 }],
+        selectedViewport: { viewportWidth: 1280, viewportHeight: 800 },
+      })
+      .mockResolvedValueOnce({
+        data: [],
+        total: 0,
+        sessions: 0,
+        invalidCoordinates: 0,
+        viewportBreakdown: [],
+        selectedViewport: null,
+      });
+
+    const { rerender } = render(<HeatmapPanel refreshToken={0} range="all" />);
+    const viewportSelect = screen.getByRole('combobox', { name: 'Heatmap viewport' });
+    await waitFor(() => expect(viewportSelect).toHaveValue('1280x800'));
+
+    rerender(<HeatmapPanel refreshToken={1} range="7d" />);
+
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Heatmap viewport' })).toHaveValue(''));
+    expect(screen.getByText('No valid clicks yet for this page and viewport.')).toBeInTheDocument();
+    expect(vi.mocked(apiFetch).mock.calls[1][0]).toContain('from=');
+  });
 });
