@@ -1,4 +1,9 @@
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const configuredApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const parsedApiUrl = new URL(configuredApiUrl);
+if (!['http:', 'https:'].includes(parsedApiUrl.protocol)) {
+  throw new Error('VITE_API_URL must use HTTP or HTTPS.');
+}
+export const API_BASE = parsedApiUrl.href.replace(/\/$/, '');
 
 const inFlightGets = new Map<string, Promise<unknown>>();
 

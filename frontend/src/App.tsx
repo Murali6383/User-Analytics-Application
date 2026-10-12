@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { BrowserRouter, Link, NavLink, Route, Routes, useParams } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { BrowserRouter, Link, NavLink, Route, Routes, useParams, useSearchParams } from 'react-router-dom';
 import {
   Activity,
   ArrowRight,
@@ -19,11 +19,14 @@ import {
   TrendingUp,
   Users,
 } from 'lucide-react';
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { API_BASE, apiFetch } from './lib/api';
+import { getHeatmapPosition, validHeatmapClicks, type HeatmapClick } from './lib/heatmap';
 import { products } from './data/products';
 
 type TrendPoint = { date: string; totalEvents: number; pageViews: number; clicks: number };
+type DateRange = 'all' | '7d' | '30d';
+type PageMetric = { pageUrl: string; pageViews: number; clicks: number };
 type Overview = {
   totalSessions: number;
   totalEvents: number;
@@ -54,6 +57,39 @@ type TrackedEvent = {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'An unexpected error occurred.';
+}
+
+function dateRangeQuery(range: DateRange) {
+  if (range === 'all') return '';
+  const days = range === '7d' ? 7 : 30;
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const from = new Date(todayUtc - (days - 1) * 24 * 60 * 60 * 1000);
+  const to = new Date(todayUtc + 24 * 60 * 60 * 1000 - 1);
+  return `from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`;
+}
+
+function rangeQuerySuffix(range: DateRange) {
+  const query = dateRangeQuery(range);
+  return query ? `?${query}` : '';
+}
+
+function DateRangeSelect({ value, onChange }: { value: DateRange; onChange: (value: DateRange) => void }) {
+  return (
+    <label className="flex items-center gap-2 text-sm text-slate-600">
+      <span>Date range</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value as DateRange)}
+        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+        aria-label="Analytics date range"
+      >
+        <option value="7d">Last 7 days</option>
+        <option value="30d">Last 30 days</option>
+        <option value="all">All time</option>
+      </select>
+    </label>
+  );
 }
 
 const sidebarItems = [
@@ -101,6 +137,7 @@ function shortId(value: string) {
 function formatDate(value: string) {
   if (!value) return '—';
   const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
   return new Intl.DateTimeFormat('en', {
     month: 'short',
     day: 'numeric',
@@ -122,13 +159,19 @@ function StatCard({ label, value, accent }: { label: string; value: string; acce
   );
 }
 
-function HeatmapPanel({ refreshToken }: { refreshToken: number }) {
-  const [points, setPoints] = useState<Array<{ _id: string; clickX: number; clickY: number; normalizedX: number; normalizedY: number }>>([]);
+export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; range: DateRange }) {
+  const [points, setPoints] = useState<Array<HeatmapClick & { _id: string }>>([]);
   const [pageUrl, setPageUrl] = useState(() => `${window.location.origin}/store/products`);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [total, setTotal] = useState(0);
   const [retry, setRetry] = useState(0);
+  const [previewHeight, setPreviewHeight] = useState(900);
+  const [previewError, setPreviewError] = useState('');
+  const previewObserver = useRef<ResizeObserver | null>(null);
+  const previewUrl = new URL(pageUrl);
+  previewUrl.searchParams.set('insighttrackPreview', '1');
+  const validPoints = validHeatmapClicks(points);
 
   useEffect(() => {
     let active = true;
@@ -136,7 +179,8 @@ function HeatmapPanel({ refreshToken }: { refreshToken: number }) {
       setLoading(true);
       setError('');
       try {
-        const data = await apiFetch<{ data: typeof points; total: number }>(`/heatmap?websiteId=demo-store&pageUrl=${encodeURIComponent(pageUrl)}&limit=40`);
+        const rangeQuery = dateRangeQuery(range);
+        const data = await apiFetch<{ data: typeof points; total: number }>(`/heatmap?websiteId=demo-store&pageUrl=${encodeURIComponent(pageUrl)}&limit=40${rangeQuery ? `&${rangeQuery}` : ''}`);
         if (!active) return;
         setPoints(data.data);
         setTotal(data.total);
@@ -150,7 +194,13 @@ function HeatmapPanel({ refreshToken }: { refreshToken: number }) {
 
     void load();
     return () => { active = false; };
-  }, [pageUrl, refreshToken, retry]);
+  }, [pageUrl, refreshToken, range, retry]);
+
+  useEffect(() => {
+    setPreviewHeight(900);
+    setPreviewError('');
+    return () => previewObserver.current?.disconnect();
+  }, [pageUrl]);
 
   return (
     <div className="card">
@@ -167,6 +217,7 @@ function HeatmapPanel({ refreshToken }: { refreshToken: number }) {
             value={pageUrl}
             onChange={(event) => setPageUrl(event.target.value)}
             className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
+            aria-label="Heatmap page"
           >
             <option value={`${window.location.origin}/store/products`}>Product Listing</option>
             <option value={`${window.location.origin}/store`}>Home</option>
@@ -175,28 +226,73 @@ function HeatmapPanel({ refreshToken }: { refreshToken: number }) {
         </div>
       </div>
 
-      <div className="relative h-72 overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-slate-100">
+      <div className="relative h-72 overflow-auto rounded-2xl border border-slate-200 bg-slate-100">
+        <iframe
+          key={pageUrl}
+          src={previewUrl.href}
+          title={`Page preview: ${new URL(pageUrl).pathname}`}
+          className="pointer-events-none block w-full border-0"
+          style={{ height: previewHeight }}
+          aria-hidden="true"
+          tabIndex={-1}
+          onLoad={(event) => {
+            try {
+              const previewDocument = event.currentTarget.contentDocument;
+              if (previewDocument) {
+                const measureHeight = () => setPreviewHeight(Math.max(
+                  previewDocument.documentElement.scrollHeight,
+                  previewDocument.body?.scrollHeight || 0,
+                  288,
+                ));
+                measureHeight();
+                previewObserver.current?.disconnect();
+                if (typeof ResizeObserver !== 'undefined') {
+                  previewObserver.current = new ResizeObserver(measureHeight);
+                  previewObserver.current.observe(previewDocument.documentElement);
+                  if (previewDocument.body) previewObserver.current.observe(previewDocument.body);
+                }
+              } else {
+                setPreviewError('The selected page preview is unavailable.');
+              }
+            } catch (previewError) {
+              setPreviewError('The selected page preview could not be measured.');
+              console.error('Could not measure the selected heatmap page preview:', previewError);
+            }
+          }}
+          onError={() => setPreviewError('The selected page preview could not be loaded.')}
+        />
         {loading ? (
-          <div className="flex h-full items-center justify-center text-sm text-slate-500">Loading click data…</div>
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/70 text-sm text-slate-500">Loading click data…</div>
         ) : error ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-rose-700">
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/90 px-4 text-center text-sm text-rose-700">
             <span>Could not load heatmap: {error}</span>
             <button onClick={() => setRetry((value) => value + 1)} className="font-medium underline">Retry</button>
           </div>
-        ) : points.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-slate-500">No clicks yet for this page.</div>
+        ) : validPoints.length === 0 ? (
+          <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-lg bg-white/90 px-3 py-2 text-sm text-slate-600 shadow">
+            {total > 0 ? 'Click events were found, but none have valid coordinates.' : 'No clicks yet for this page.'}
+          </div>
         ) : (
-          points.map((point, index) => (
-            <span
-              key={`${point._id}-${index}`}
-              className="absolute h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand-500/80 shadow-lg shadow-brand-500/20"
-              style={{
-                left: `${Math.min(Math.max(point.normalizedX || 0, 2), 98)}%`,
-                top: `${Math.min(Math.max(point.normalizedY || 0, 2), 98)}%`,
-              }}
-              title={`click at ${point.clickX}, ${point.clickY}`}
-            />
-          ))
+          <div className="pointer-events-none absolute left-0 top-0 z-10 w-full" style={{ height: previewHeight }}>
+            {validPoints.map((point, index) => {
+              const position = getHeatmapPosition(point);
+              if (!position) return null;
+
+              return (
+                <span
+                  key={`${point._id}-${index}`}
+                  className="absolute h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-brand-500/80 shadow-lg shadow-brand-500/30"
+                  style={position}
+                  title={`click at ${point.clickX}, ${point.clickY}`}
+                />
+              );
+            })}
+          </div>
+        )}
+        {previewError && !loading && !error && (
+          <div role="status" className="pointer-events-none absolute bottom-2 left-2 z-20 rounded-lg bg-white/90 px-3 py-2 text-xs text-amber-800 shadow">
+            {previewError}
+          </div>
         )}
       </div>
     </div>
@@ -209,6 +305,8 @@ function DashboardOverview() {
   const [loading, setLoading] = useState(true);
   const [refreshToken, setRefreshToken] = useState(0);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [range, setRange] = useState<DateRange>('30d');
+  const [pages, setPages] = useState<PageMetric[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -216,9 +314,15 @@ function DashboardOverview() {
       setLoading(true);
       setError('');
       try {
-        const response = await apiFetch<Overview>(`/analytics/overview?websiteId=demo-store`);
+        const rangeQuery = dateRangeQuery(range);
+        const query = `?websiteId=demo-store${rangeQuery ? `&${rangeQuery}` : ''}`;
+        const [response, pageResponse] = await Promise.all([
+          apiFetch<Overview>(`/analytics/overview${query}`),
+          apiFetch<{ data: PageMetric[] }>(`/pages${query}`),
+        ]);
         if (!active) return;
         setSummary(response);
+        setPages(pageResponse.data);
         setLastRefresh(new Date());
       } catch (loadError) {
         if (!active) return;
@@ -233,7 +337,7 @@ function DashboardOverview() {
       active = false;
       window.clearInterval(interval);
     };
-  }, [refreshToken]);
+  }, [refreshToken, range]);
 
   const chartData = summary?.trend || [];
 
@@ -244,7 +348,8 @@ function DashboardOverview() {
           <p className="text-sm uppercase tracking-[0.2em] text-slate-500">Performance overview</p>
           <h1 className="text-3xl font-semibold tracking-tight text-slate-900">Website analytics</h1>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <DateRangeSelect value={range} onChange={setRange} />
           <div className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
             Last refresh: {lastRefresh?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) || '—'}
           </div>
@@ -296,7 +401,9 @@ function DashboardOverview() {
                   <XAxis dataKey="date" tick={{ fontSize: 12 }} />
                   <YAxis tick={{ fontSize: 12 }} allowDecimals={false} />
                   <Tooltip />
-                  <Area type="monotone" dataKey="totalEvents" stroke="#2563eb" fill="url(#trendFill)" strokeWidth={3} />
+                  <Legend />
+                  <Area type="monotone" dataKey="totalEvents" name="Events" stroke="#2563eb" fill="url(#trendFill)" strokeWidth={3} />
+                  <Area type="monotone" dataKey="pageViews" name="Page views" stroke="#059669" fill="transparent" strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
@@ -305,7 +412,34 @@ function DashboardOverview() {
           </div>
         </div>
 
-        <HeatmapPanel refreshToken={refreshToken} />
+        <HeatmapPanel refreshToken={refreshToken} range={range} />
+      </div>
+      <div className="card">
+        <div className="mb-4">
+          <p className="text-sm font-medium text-slate-500">Content performance</p>
+          <h2 className="text-xl font-semibold text-slate-900">Page breakdown</h2>
+          <p className="mt-1 text-sm text-slate-500">Unique pages are canonical URLs, counted within this website and date range.</p>
+        </div>
+        {loading && pages.length === 0 ? <p className="text-sm text-slate-500">Loading page metrics…</p> : pages.length === 0 ? (
+          <p className="text-sm text-slate-500">No page activity in this date range.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left">
+              <thead className="bg-slate-50 text-xs uppercase tracking-[0.12em] text-slate-500">
+                <tr><th className="px-4 py-3">Page URL</th><th className="px-4 py-3">Page views</th><th className="px-4 py-3">Clicks</th></tr>
+              </thead>
+              <tbody>
+                {pages.slice(0, 10).map((page) => (
+                  <tr key={page.pageUrl} className="border-t border-slate-100">
+                    <td className="max-w-xl truncate px-4 py-3 text-sm text-slate-700" title={page.pageUrl}>{page.pageUrl}</td>
+                    <td className="px-4 py-3 text-sm text-slate-700">{formatNumber(page.pageViews)}</td>
+                    <td className="px-4 py-3 text-sm text-slate-700">{formatNumber(page.clicks)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -314,11 +448,23 @@ function DashboardOverview() {
 function DashboardSessions() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [lastPage, setLastPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+  const [range, setRange] = useState<DateRange>('30d');
+  const [sortBy, setSortBy] = useState<'lastSeen' | 'firstSeen' | 'totalEvents' | 'pageViews' | 'clicks'>('lastSeen');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
 
   useEffect(() => {
     let active = true;
@@ -326,10 +472,20 @@ function DashboardSessions() {
       setLoading(true);
       setError('');
       try {
-      const response = await apiFetch<{ data: SessionSummary[]; pagination?: { totalPages: number } }>(`/sessions?websiteId=demo-store&page=${page}&limit=10`);
-      if (!active) return;
-      setSessions(response.data || []);
-      setLastPage(response.pagination?.totalPages || 1);
+        const rangeQuery = dateRangeQuery(range);
+        const params = new URLSearchParams({
+          websiteId: 'demo-store',
+          page: String(page),
+          limit: '10',
+          sortBy,
+          sortOrder,
+        });
+        if (debouncedSearch) params.set('search', debouncedSearch);
+        if (rangeQuery) new URLSearchParams(rangeQuery).forEach((value, key) => params.set(key, value));
+        const response = await apiFetch<{ data: SessionSummary[]; pagination?: { totalPages: number } }>(`/sessions?${params.toString()}`);
+        if (!active) return;
+        setSessions(response.data || []);
+        setLastPage(response.pagination?.totalPages || 1);
       } catch (loadError) {
         if (!active) return;
         setError(errorMessage(loadError));
@@ -339,9 +495,24 @@ function DashboardSessions() {
     };
     void load();
     return () => { active = false; };
-  }, [page, retry]);
+  }, [page, retry, range, debouncedSearch, sortBy, sortOrder]);
 
-  const filtered = sessions.filter((session) => session.sessionId.toLowerCase().includes(search.toLowerCase()));
+  function toggleSort(column: typeof sortBy) {
+    if (sortBy === column) setSortOrder((order) => order === 'asc' ? 'desc' : 'asc');
+    else {
+      setSortBy(column);
+      setSortOrder(column === 'firstSeen' ? 'asc' : 'desc');
+    }
+    setPage(1);
+  }
+
+  function sortLabel(column: typeof sortBy, label: string) {
+    return (
+      <button type="button" onClick={() => toggleSort(column)} className="inline-flex items-center gap-1 hover:text-slate-800" aria-label={`Sort by ${label}`}>
+        {label}{sortBy === column ? (sortOrder === 'asc' ? ' ↑' : ' ↓') : ''}
+      </button>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -350,18 +521,22 @@ function DashboardSessions() {
           <p className="text-sm uppercase tracking-[0.2em] text-slate-500">Sessions</p>
           <h1 className="text-3xl font-semibold tracking-tight text-slate-900">Explorer</h1>
         </div>
-        <div className="relative w-full max-w-sm">
-          <Search className="absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-700 outline-none ring-offset-0 focus:border-brand-500"
-            placeholder="Search session ID"
-          />
+        <div className="flex flex-wrap items-center gap-3">
+          <DateRangeSelect value={range} onChange={(nextRange) => { setRange(nextRange); setPage(1); }} />
+          <div className="relative w-full max-w-sm">
+            <Search className="absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-700 outline-none ring-offset-0 focus:border-brand-500"
+              placeholder="Search session ID"
+              aria-label="Search session ID"
+            />
+          </div>
+          <button onClick={() => setRetry((value) => value + 1)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700" disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
         </div>
-        <button onClick={() => setRetry((value) => value + 1)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700" disabled={loading}>
-          <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
-        </button>
       </div>
 
       {error ? <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">Could not load sessions: {error}</div> : null}
@@ -371,11 +546,11 @@ function DashboardSessions() {
             <thead className="bg-slate-50 text-xs uppercase tracking-[0.12em] text-slate-500">
               <tr>
                 <th className="px-4 py-3">Session</th>
-                <th className="px-4 py-3">First seen</th>
-                <th className="px-4 py-3">Last seen</th>
-                <th className="px-4 py-3">Events</th>
-                <th className="px-4 py-3">Page views</th>
-                <th className="px-4 py-3">Clicks</th>
+                <th className="px-4 py-3">{sortLabel('firstSeen', 'First seen')}</th>
+                <th className="px-4 py-3">{sortLabel('lastSeen', 'Last seen')}</th>
+                <th className="px-4 py-3">{sortLabel('totalEvents', 'Events')}</th>
+                <th className="px-4 py-3">{sortLabel('pageViews', 'Page views')}</th>
+                <th className="px-4 py-3">{sortLabel('clicks', 'Clicks')}</th>
                 <th className="px-4 py-3">Pages</th>
                 <th className="px-4 py-3">Action</th>
               </tr>
@@ -383,12 +558,12 @@ function DashboardSessions() {
             <tbody>
               {loading ? (
                 <tr><td className="px-4 py-8 text-sm text-slate-500" colSpan={8}>Loading sessions…</td></tr>
-              ) : filtered.length === 0 ? (
+              ) : sessions.length === 0 ? (
                 <tr>
                   <td className="px-4 py-8 text-sm text-slate-500" colSpan={8}>{error ? 'Session data is unavailable.' : 'No sessions match the current filter.'}</td>
                 </tr>
               ) : (
-                filtered.map((session) => (
+                sessions.map((session) => (
                   <tr key={session.sessionId} className="border-t border-slate-100 transition hover:bg-slate-50">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
@@ -409,7 +584,7 @@ function DashboardSessions() {
                     <td className="px-4 py-3 text-sm text-slate-600">{session.clicks}</td>
                     <td className="px-4 py-3 text-sm text-slate-600">{session.uniquePages}</td>
                     <td className="px-4 py-3">
-                      <Link to={`/dashboard/session/${encodeURIComponent(session.sessionId)}`} className="inline-flex items-center gap-1 text-sm font-medium text-brand-600 hover:text-brand-700">
+                      <Link to={`/dashboard/session/${encodeURIComponent(session.sessionId)}${rangeQuerySuffix(range)}`} className="inline-flex items-center gap-1 text-sm font-medium text-brand-600 hover:text-brand-700">
                         View <ChevronRight size={14} />
                       </Link>
                     </td>
@@ -444,10 +619,13 @@ function DashboardSessions() {
 
 function DashboardSessionDetail() {
   const { sessionId } = useParams();
+  const [searchParams] = useSearchParams();
   const [events, setEvents] = useState<TrackedEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
 
   useEffect(() => {
     let active = true;
@@ -461,9 +639,15 @@ function DashboardSessionDetail() {
       setLoading(true);
       setError('');
       try {
-        const response = await apiFetch<{ data: TrackedEvent[] }>(`/sessions/${encodeURIComponent(sessionId)}/events?websiteId=demo-store&page=1&limit=40`);
+        const params = new URLSearchParams({ websiteId: 'demo-store', page: String(page), limit: '40' });
+        const from = searchParams.get('from');
+        const to = searchParams.get('to');
+        if (from) params.set('from', from);
+        if (to) params.set('to', to);
+        const response = await apiFetch<{ data: TrackedEvent[]; pagination?: { totalPages: number } }>(`/sessions/${encodeURIComponent(sessionId)}/events?${params.toString()}`);
         if (!active) return;
         setEvents(response.data || []);
+        setTotalPages(response.pagination?.totalPages || 1);
       } catch (loadError) {
         if (!active) return;
         setError(errorMessage(loadError));
@@ -474,7 +658,11 @@ function DashboardSessionDetail() {
 
     void load();
     return () => { active = false; };
-  }, [sessionId, retry]);
+  }, [sessionId, retry, page, searchParams]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [sessionId, searchParams]);
 
   return (
     <div className="space-y-6">
@@ -521,6 +709,13 @@ function DashboardSessionDetail() {
             ))
           )}
         </div>
+        {!loading && !error && events.length > 0 ? (
+          <div className="mt-5 flex items-center justify-between border-t border-slate-200 pt-4">
+            <button className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-600 disabled:opacity-50" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page <= 1}>Previous</button>
+            <span className="text-sm text-slate-600">Page {page} of {totalPages}</span>
+            <button className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-600 disabled:opacity-50" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={page >= totalPages}>Next</button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

@@ -85,6 +85,30 @@ describe('analytics API routes', () => {
     expect(services.createEvent).not.toHaveBeenCalled();
   });
 
+  it('validates tracking payloads and acknowledges idempotent duplicate writes', async () => {
+    await request(app)
+      .post('/api/events')
+      .send({ websiteId: 'demo-store', eventType: 'click' })
+      .expect(400);
+    expect(services.createEvent).not.toHaveBeenCalled();
+
+    services.createEvent.mockRejectedValueOnce({ code: 11000 });
+    const response = await request(app)
+      .post('/api/events')
+      .send({
+        eventId: 'a7970193-765d-4876-9ee0-9cd81e9d02d1',
+        websiteId: 'demo-store',
+        sessionId: 'session-1',
+        eventType: 'page_view',
+        pageUrl: 'http://localhost:5173/store',
+        timestamp: '2026-10-12T08:30:00.000Z',
+      })
+      .expect(200);
+
+    expect(response.body).toMatchObject({ success: true, duplicate: true });
+    expect(services.createEvent).toHaveBeenCalledTimes(1);
+  });
+
   it('returns a 400 JSON error for invalid heatmap parameters', async () => {
     const response = await request(app)
       .get('/api/heatmap?websiteId=demo-store&pageUrl=not-a-url')

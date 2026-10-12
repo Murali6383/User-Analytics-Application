@@ -43,6 +43,19 @@
     }
   }
 
+  function readCookie(name) {
+    const entry = document.cookie
+      .split(';')
+      .map((part) => part.trim().split('='))
+      .find(([cookieName]) => cookieName === name);
+    if (!entry) return null;
+    try {
+      return decodeURIComponent(entry.slice(1).join('='));
+    } catch {
+      return null;
+    }
+  }
+
   function canonicalPageUrl(value) {
     const url = new URL(value, window.location.href);
     url.hash = '';
@@ -60,18 +73,7 @@
   function readSessionId() {
     const stored = storageGet(SESSION_KEY);
     if (stored) return stored;
-
-    const entry = document.cookie
-      .split(';')
-      .map((part) => part.trim().split('='))
-      .find(([name]) => name === 'insighttrack_session');
-    if (!entry) return null;
-
-    try {
-      return decodeURIComponent(entry.slice(1).join('='));
-    } catch {
-      return null;
-    }
+    return readCookie('insighttrack_session');
   }
 
   function writeSessionId(sessionId) {
@@ -80,13 +82,20 @@
     document.cookie = `insighttrack_session=${encodeURIComponent(sessionId)}; path=/; expires=${expires}; SameSite=Lax`;
   }
 
+  function writeSessionLastSeen(timestamp) {
+    storageSet(LAST_SEEN_KEY, String(timestamp));
+    const expires = new Date(timestamp + SESSION_TIMEOUT_MS).toUTCString();
+    document.cookie = `insighttrack_last_seen=${encodeURIComponent(String(timestamp))}; path=/; expires=${expires}; SameSite=Lax`;
+  }
+
   function ensureSession() {
-    const lastSeen = Number(storageGet(LAST_SEEN_KEY));
+    const lastSeenValue = storageGet(LAST_SEEN_KEY) || readCookie('insighttrack_last_seen');
+    const lastSeen = Number(lastSeenValue);
     const expired = !Number.isFinite(lastSeen) || Date.now() - lastSeen > SESSION_TIMEOUT_MS;
     const sessionId = readSessionId();
     const activeSessionId = sessionId && !expired ? sessionId : createUuid();
     writeSessionId(activeSessionId);
-    storageSet(LAST_SEEN_KEY, String(Date.now()));
+    writeSessionLastSeen(Date.now());
     return activeSessionId;
   }
 
@@ -121,6 +130,7 @@
 
     function buildEventPayload(eventType, extra = {}) {
       const payload = {
+        eventId: createUuid(),
         websiteId: state.config.websiteId,
         sessionId: state.config.sessionId,
         eventType,
@@ -171,8 +181,15 @@
       }
     }
 
+    function touchSession() {
+      if (state.config && state.config.sessionId) {
+        writeSessionId(state.config.sessionId);
+        writeSessionLastSeen(Date.now());
+      }
+    }
+
     function trackPageView() {
-      if (!state.config || !state.config.enabled || isIgnoredPage()) return;
+      if (!state.config || !state.config.enabled) return;
       let pageUrl;
       try {
         pageUrl = canonicalPageUrl(window.location.href);
@@ -181,9 +198,16 @@
         return;
       }
 
+      if (isIgnoredPage()) {
+        state.lastPageUrl = pageUrl;
+        state.lastPageTrackedAt = Date.now();
+        return;
+      }
+
       if (pageUrl === state.lastPageUrl && Date.now() - state.lastPageTrackedAt < 100) return;
       state.lastPageUrl = pageUrl;
       state.lastPageTrackedAt = Date.now();
+      touchSession();
       void sendPayload(buildEventPayload('page_view'));
     }
 
@@ -196,6 +220,7 @@
         const element = event.target.closest('a, button, [data-insighttrack-id]');
         if (!element || element.closest('[data-insighttrack-ignore], [data-insighttrack-sensitive], form, [contenteditable="true"]')) return;
         if (element instanceof HTMLButtonElement && element.type === 'submit' && element.form) return;
+        touchSession();
 
         const payload = buildEventPayload('click', {
           pageX: Number.isFinite(event.pageX) ? event.pageX : event.clientX + window.scrollX,
@@ -246,10 +271,11 @@
           merged.websiteId = merged.websiteId.trim();
           merged.apiUrl = apiUrl.href.replace(/\/$/, '');
           const optedOut = storageGet('insighttrack_opt_out') === 'true';
+          const isPreview = new URLSearchParams(window.location.search).get('insighttrackPreview') === '1';
           const disabledByDnt = merged.respectDoNotTrack && isDoNotTrackEnabled();
           state.config = {
             ...merged,
-            enabled: !merged.optOut && !optedOut && !disabledByDnt,
+            enabled: !merged.optOut && !optedOut && !disabledByDnt && !isPreview,
             sessionId: null,
           };
 
@@ -286,6 +312,7 @@
       },
       isOptedOut() {
         return storageGet('insighttrack_opt_out') === 'true'
+          || new URLSearchParams(window.location.search).get('insighttrackPreview') === '1'
           || Boolean(state.config && state.config.respectDoNotTrack && isDoNotTrackEnabled());
       },
       getConfig() {

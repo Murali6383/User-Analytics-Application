@@ -35,6 +35,7 @@ describe('InsightTrack browser SDK', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toMatchObject({
+      eventId: expect.any(String),
       websiteId: 'demo-store',
       sessionId: initialized.sessionId,
       eventType: 'page_view',
@@ -45,6 +46,7 @@ describe('InsightTrack browser SDK', () => {
     await new Promise((resolveTick) => window.setTimeout(resolveTick, 0));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toMatchObject({
+      eventId: expect.any(String),
       sessionId: initialized.sessionId,
       eventType: 'page_view',
       pageUrl: `${window.location.origin}/store/products`,
@@ -61,11 +63,17 @@ describe('InsightTrack browser SDK', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(JSON.parse(fetchMock.mock.calls[2][1].body as string)).toMatchObject({
+      eventId: expect.any(String),
       sessionId: initialized.sessionId,
       eventType: 'click',
       pageUrl: `${window.location.origin}/store/products`,
       clickX: 24,
       clickY: 36,
+      timestamp: expect.any(String),
+      viewportWidth: expect.any(Number),
+      viewportHeight: expect.any(Number),
+      documentWidth: expect.any(Number),
+      documentHeight: expect.any(Number),
     });
 
     window.history.pushState({}, '', '/dashboard/sessions');
@@ -76,5 +84,18 @@ describe('InsightTrack browser SDK', () => {
     refreshButton.click();
     await new Promise((resolveTick) => window.setTimeout(resolveTick, 0));
     expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    const returnToProducts = new Promise<void>((resolvePop) => {
+      window.addEventListener('popstate', () => resolvePop(), { once: true });
+    });
+    window.history.back();
+    await returnToProducts;
+    await new Promise((resolveTick) => window.setTimeout(resolveTick, 0));
+    expect(window.location.pathname).toBe('/store/products');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body as string)).toMatchObject({
+      eventType: 'page_view',
+      pageUrl: `${window.location.origin}/store/products`,
+    });
   });
 });

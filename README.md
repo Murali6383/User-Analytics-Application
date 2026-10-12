@@ -1,93 +1,140 @@
-# InsightTrack — Web Session Analytics & Click Heatmap
+# InsightTrack
 
-InsightTrack is a full-stack web analytics product that captures page views and clicks via a lightweight browser SDK, stores events in MongoDB, and surfaces a SaaS analytics dashboard.
+InsightTrack is a small full-stack web analytics application for exploring shopper journeys and click activity. A browser SDK records page views and clicks from the demo storefront, an Express API validates and stores events in MongoDB, and a React dashboard presents overview metrics, page performance, sessions, timelines, and click heatmaps.
 
-## Stack
+## Architecture
 
-- Frontend: React + Vite + TypeScript + Tailwind CSS
-- Backend: Node.js + Express + TypeScript
-- Database: MongoDB + Mongoose
-- Validation: Zod
-- Charts: Recharts
-
-## Workspace layout
-
-- `backend/` — Express API with MongoDB-backed analytics endpoints
-- `frontend/` — React dashboard and demo storefront
-- `sdk/` — Standalone JavaScript tracking SDK for any website
-
-## Quick start
-
-1. Install dependencies:
-
-   npm install
-
-2. Copy example environment files:
-
-   - `backend/.env.example` -> `backend/.env`
-   - `frontend/.env.example` -> `frontend/.env`
-
-3. Start MongoDB locally and ensure it is running on the default port.
-
-   The backend reads `backend/.env` (`MONGODB_URI`, `PORT`, and `FRONTEND_ORIGIN`); the frontend reads `frontend/.env` (`VITE_API_URL`). The defaults are `mongodb://127.0.0.1:27017/insighttrack`, port `5000`, `http://localhost:5173`, and `http://localhost:5000/api`.
-
-4. Launch the app:
-
-   npm run dev
-
-   - Frontend: http://localhost:5173
-   - Backend: http://localhost:5000
-
-## SDK integration example
-
-```html
-<script src="https://cdn.example.com/insighttrack.js"></script>
-<script>
-  InsightTrack.init({
-    apiUrl: 'http://localhost:5000/api',
-    websiteId: 'demo-store',
-    respectDoNotTrack: true,
-    optOut: false,
-  });
-</script>
+```mermaid
+flowchart LR
+  Store["Demo storefront / browser SDK"] -->|"POST /api/events (eventId)"| API["Express + Zod API"]
+  API --> DB[("MongoDB: events collection")]
+  Dashboard["React analytics dashboard"] -->|"Read-only GET /api/*"| API
+  API -->|"Aggregation, pagination, URL filtering"| DB
 ```
 
-Or, to use the local SDK file in this repo:
+## Features
 
-```html
-<script src="/sdk/insighttrack.js"></script>
-<script>
-  InsightTrack.init({
-    apiUrl: 'http://localhost:5000/api',
-    websiteId: 'demo-store',
-    respectDoNotTrack: true,
-  });
-</script>
+- Browser SDK tracks initial page loads, SPA history changes, browser back/forward navigation, and eligible link/button clicks.
+- Stable per-tab anonymous session IDs, Do Not Track support, sensitive URL query redaction, and click coordinates relative to the document.
+- Event IDs with a MongoDB unique index make repeated submissions of the same event idempotent. The SDK does not automatically retry failed event POSTs.
+- MongoDB-backed overview and trend aggregations, page breakdown, date presets, searchable/sortable/paginated sessions, ordered event timelines, and per-page click heatmaps.
+- Dashboard routes are excluded from event collection. Analytics reads do not create events.
+- Loading, empty, validation, database, and request-error states.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite, TypeScript, React Router, Tailwind CSS, Recharts |
+| Backend | Node.js, Express, TypeScript, Zod, Helmet, express-rate-limit |
+| Database | MongoDB with Mongoose |
+| SDK | Standalone browser JavaScript |
+| Tests | Vitest, Testing Library, Supertest |
+
+## Prerequisites
+
+- Node.js 20 or newer and npm
+- MongoDB running locally or a MongoDB connection URI
+
+## Local setup
+
+From the repository root:
+
+```powershell
+npm install
+Copy-Item backend\.env.example backend\.env
+Copy-Item frontend\.env.example frontend\.env
+npm run dev
 ```
 
-The SDK uses `sessionStorage` to keep a stable session ID for the active tab and resets it after 30 minutes of inactivity. The same-tab session is not a unique-person identifier and is intended to represent a browsing session rather than an identity.
-It automatically tracks the initial page, SPA history navigation, browser back/forward, and clicks on links and buttons. It never records form values or element text, skips form controls, honors Do Not Track, and redacts common sensitive query parameter names.
+The frontend is served at `http://localhost:5173`; the API is served at `http://localhost:5000`. Start MongoDB before starting the backend. `backend/.env` is loaded from the backend workspace and `frontend/.env` is loaded by Vite.
 
-## Backend API overview
+### Environment variables
 
-- `POST /api/events` — store page view or click events
-- `GET /api/sessions` — grouped session summaries
-- `GET /api/sessions/:sessionId/events` — session timeline
-- `GET /api/pages` — page-level analytics
-- `GET /api/heatmap` — click heatmap points and normalized percentages
-- `GET /api/analytics/overview` — KPI summary
-- `GET /api/health` — service health and database status
+`backend/.env.example`:
 
-Events are stored in MongoDB's `events` collection. Overview CTR is calculated consistently as `clicks / pageViews * 100` (zero when there are no page views); heatmap coordinates are document-relative click positions normalized to percentages.
-The dashboard routes are excluded from SDK event collection, and dashboard API reads use uncached GET requests only. API reads and tracking-event writes have separate rate limits so routine analytics refreshes do not consume the event-ingestion allowance.
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `5000` | API listen port |
+| `MONGODB_URI` | `mongodb://127.0.0.1:27017/insighttrack` | MongoDB connection |
+| `NODE_ENV` | `development` | Runtime mode (`development`, `test`, or `production`) |
+| `FRONTEND_ORIGIN` | `http://localhost:5173` | Allowed browser origin for CORS |
 
-## Demo storefront
+`frontend/.env.example`:
 
-The React app includes a storefront with Home, Product Listing, Product Detail, and Cart pages. It initializes the tracking SDK and logs product clicks, navigation, and session events for testing and demonstration.
+| Variable | Default | Purpose |
+|---|---|---|
+| `VITE_API_URL` | `http://localhost:5000/api` | API base URL |
 
-## Notes
+The backend validates the port, MongoDB URI scheme, runtime mode, and frontend origin at startup. Do not commit `.env` files or production credentials.
 
-- URLs are validated and canonicalized without silently merging distinct query strings.
-- The SDK uses a cryptographically strong UUID with a graceful fallback for older browsers.
-- Events are sent to `POST /api/events` with `fetch` and `keepalive`; development failures are reported to the browser console.
-- To verify end to end, open `/store`, use **Explore products**, open a product and click **Add to cart**, navigate to **View cart**, then open **Overview** or **Sessions**. The dashboard should show the persisted session, events, and click heatmap points.
+## Demo walkthrough
+
+1. Open `/store` and choose **Explore products**.
+2. Open a product, click **Add to cart**, and visit the cart. Each page navigation and eligible click is recorded once.
+3. Open **Overview** to inspect database-derived KPIs, the event/page-view trend, page breakdown, and heatmap. Choose Home, Product Listing, or Cart in the heatmap selector; scroll the actual page preview to inspect click positions.
+4. Open **Sessions**, search or sort the session list, then choose **View** to see its chronological event timeline.
+5. Refresh either dashboard view. Dashboard reads do not create analytics records.
+
+The dashboard itself is intentionally excluded from tracking. The heatmap preview uses the real same-origin storefront page with a preview query flag that disables tracking inside the embedded page.
+
+## API
+
+All API paths are under `/api`. Successful responses use JSON and analytics GET responses are marked `Cache-Control: no-store`.
+
+| Method and path | Purpose |
+|---|---|
+| `POST /events` | Validate and persist a page view or click |
+| `GET /analytics/overview` | Totals, CTR, and daily trend |
+| `GET /pages` | Page views and clicks grouped by canonical page URL |
+| `GET /sessions` | Paginated session summaries; supports search, sort, and date filters |
+| `GET /sessions/:sessionId/events` | Chronological, paginated session events |
+| `GET /heatmap` | Paginated click coordinates for a selected page |
+| `GET /health` | API and MongoDB connection status |
+
+The event payload includes `eventId` (UUID), `websiteId`, `sessionId`, `eventType` (`page_view` or `click`), absolute HTTP(S) `pageUrl`, and ISO timestamp. Click events additionally require numeric `clickX` and `clickY`; the SDK records document-relative CSS pixels and includes viewport/document dimensions. A repeated `(websiteId, eventId)` returns success with `duplicate: true` and is not inserted again. Older clients may omit `eventId`; new integrations should always send it.
+
+Analytics endpoints accept optional ISO-8601 `from` and `to` timestamps. The dashboard's 7- and 30-day presets use UTC day boundaries consistently across overview, page, heatmap, session, and journey queries. Sessions are distinct `(websiteId, sessionId)` pairs; unique pages are distinct `(websiteId, canonical pageUrl)` pairs within the selected date range. CTR is `clicks / pageViews * 100`, or zero when there are no page views.
+
+## Database model
+
+Events are stored in MongoDB's `events` collection. Each document contains:
+
+| Field | Meaning |
+|---|---|
+| `eventId` | Optional UUID idempotency key; unique with `websiteId` when present |
+| `websiteId`, `sessionId` | Analytics site and anonymous browsing session |
+| `eventType` | `page_view` or `click` |
+| `pageUrl`, `timestamp` | Canonical absolute URL and event time |
+| `clickX`, `clickY` | Document-relative click point; present for click events |
+| `viewportWidth`, `viewportHeight` | Browser viewport dimensions at the click |
+| `documentWidth`, `documentHeight` | Page dimensions used to normalize heatmap coordinates |
+| `elementTag` | Clicked element type; no text or form value is collected |
+
+Indexes support website/session/time queries, website/page/type/time heatmaps, website/type/time analytics, and unique event idempotency. Mongoose manages index creation; production deployments should ensure index builds are completed before accepting ingestion.
+
+## Quality checks
+
+```powershell
+npm test
+npm run build
+```
+
+The repository does not currently configure a standalone lint script. The production build runs TypeScript project checks for the frontend and TypeScript compilation for the backend.
+
+## Screenshots
+
+No screenshots are committed yet. Capture the Overview, Sessions, Journey, and Heatmap views from a locally running instance and add them here when available; do not use fabricated or mock analytics screenshots.
+
+## Deployment
+
+No hosted deployment is configured. To deploy, build the frontend with `npm run build --workspace frontend` and serve its `frontend/dist` as a single-page application with history fallback. Build the API with `npm run build --workspace backend`, run it with `npm start --workspace backend`, and provide a reachable MongoDB URI, API port, `FRONTEND_ORIGIN`, and frontend `VITE_API_URL` at build time. Restrict CORS to the deployed frontend origin and use HTTPS for both services. Keep credentials in the hosting provider's secret/environment configuration.
+
+## Assumptions and limitations
+
+- A session is scoped to a browser tab using `sessionStorage` with a cookie fallback. It is anonymous and is not a unique-person identity.
+- Events are append-only. The application does not delete, merge, or automatically clean historical events.
+- Existing records created before `eventId` was added are not retroactively deduplicated. To investigate possible historical duplicates, export/read-only aggregate records grouped by `websiteId`, `sessionId`, `eventType`, canonical `pageUrl`, and a narrow timestamp/coordinate window; review candidates manually before any backup-backed, explicitly approved cleanup. Identical clicks can be legitimate, so these fields cannot prove duplication.
+- Heatmaps visualize document-relative normalized points over a live page preview. They are not pixel-perfect historical screenshots; page layout changes since a click can affect visual alignment.
+- Date aggregation and date presets use UTC; displayed timestamps use the browser's local timezone.
+- `npm run dev` requires a working MongoDB service. API startup fails rather than silently switching to an in-memory or mock database.

@@ -13,6 +13,9 @@ export async function getSessionsController(req: Request, res: Response, next: N
       websiteId: req.query.websiteId,
       from: req.query.from,
       to: req.query.to,
+      search: req.query.search,
+      sortBy: req.query.sortBy,
+      sortOrder: req.query.sortOrder,
     });
 
     const result = await getSessionSummaries({
@@ -21,6 +24,9 @@ export async function getSessionsController(req: Request, res: Response, next: N
       to: query.to,
       page: query.page,
       limit: query.limit,
+      search: query.search,
+      sortBy: query.sortBy,
+      sortOrder: query.sortOrder,
     });
 
     return res.json({ success: true, ...result });

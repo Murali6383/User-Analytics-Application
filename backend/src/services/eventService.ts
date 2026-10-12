@@ -2,7 +2,25 @@ import type { FilterQuery } from 'mongoose';
 import { EventModel } from '../models/Event.js';
 
 const DEFAULT_PAGE_SIZE = 20;
-const SENSITIVE_QUERY_KEYS = /^(?:token|access_token|refresh_token|auth|authorization|password|passwd|email|phone|mobile|ssn|secret|code)$/i;
+const SENSITIVE_QUERY_KEYS = /(?:token|auth|password|passwd|email|phone|mobile|ssn|secret|code|api[_-]?key|jwt|user(?:name|id)?|customer(?:name|id)?|first[_-]?name|last[_-]?name|address|birth(?:day|date)?|dob|postal|zip)/i;
+
+type EventPayload = {
+  eventId?: string;
+  websiteId: string;
+  sessionId: string;
+  eventType: 'page_view' | 'click';
+  pageUrl: string;
+  timestamp: string;
+  clickX?: number;
+  clickY?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  documentWidth?: number;
+  documentHeight?: number;
+  pageTitle?: string;
+  elementTag?: string;
+  elementId?: string;
+};
 
 function normalizePageUrl(value: string) {
   const url = new URL(value);
@@ -40,14 +58,7 @@ function buildDateMatch(filters: { from?: string; to?: string }) {
   return Object.keys(dateMatch).length > 0 ? { timestamp: dateMatch } : {};
 }
 
-export async function createEvent(payload: {
-  websiteId: string;
-  sessionId: string;
-  eventType: 'page_view' | 'click';
-  pageUrl: string;
-  timestamp: string;
-  [key: string]: unknown;
-}) {
+export async function createEvent(payload: EventPayload) {
   const event = await EventModel.create({
     ...payload,
     pageUrl: normalizePageUrl(payload.pageUrl),
@@ -57,9 +68,22 @@ export async function createEvent(payload: {
   return event.toObject();
 }
 
-export async function getSessionSummaries({ websiteId, from, to, page, limit }: { websiteId?: string; from?: string; to?: string; page: number; limit: number }) {
+export async function getSessionSummaries({ websiteId, from, to, page, limit, search, sortBy, sortOrder }: {
+  websiteId?: string;
+  from?: string;
+  to?: string;
+  page: number;
+  limit: number;
+  search?: string;
+  sortBy: 'lastSeen' | 'firstSeen' | 'totalEvents' | 'pageViews' | 'clicks';
+  sortOrder: 'asc' | 'desc';
+}) {
   const match: Record<string, any> = {};
   if (websiteId) match.websiteId = websiteId;
+  if (search) {
+    const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    match.sessionId = { $regex: escapedSearch, $options: 'i' };
+  }
   const dateMatch = buildDateMatch({ from, to });
   Object.assign(match, dateMatch);
 
@@ -95,7 +119,7 @@ export async function getSessionSummaries({ websiteId, from, to, page, limit }: 
         uniquePages: { $size: '$uniquePages' },
       },
     },
-    { $sort: { lastSeen: -1 as const } },
+    { $sort: { [sortBy]: sortOrder === 'asc' ? 1 : -1, sessionId: 1 } },
     { $skip: (page - 1) * limit },
     { $limit: limit },
   ];
@@ -130,7 +154,7 @@ export async function getSessionEvents({ sessionId, websiteId, from, to, page, l
 
   const total = await EventModel.countDocuments(search);
   const events = await EventModel.find(search)
-    .sort({ timestamp: 1 })
+    .sort({ timestamp: 1, _id: 1 })
     .skip((page - 1) * limit)
     .limit(limit || DEFAULT_PAGE_SIZE)
     .lean();
@@ -184,17 +208,31 @@ export async function getHeatmap({ websiteId, pageUrl, from, to, limit = 200 }: 
     .limit(limit)
     .lean();
 
-  const normalized = events.map((event: any) => {
-    const documentWidth = Math.max(Number(event.documentWidth || 0), Number(event.viewportWidth || 0), 1);
-    const documentHeight = Math.max(Number(event.documentHeight || 0), Number(event.viewportHeight || 0), 1);
+  const normalized = events.flatMap((event: any) => {
+    const clickX = Number(event.clickX);
+    const clickY = Number(event.clickY);
+    const documentWidth = Math.max(Number(event.documentWidth || 0), Number(event.viewportWidth || 0));
+    const documentHeight = Math.max(Number(event.documentHeight || 0), Number(event.viewportHeight || 0));
+    if (
+      !Number.isFinite(clickX)
+      || clickX < 0
+      || !Number.isFinite(clickY)
+      || clickY < 0
+      || !Number.isFinite(documentWidth)
+      || documentWidth <= 0
+      || !Number.isFinite(documentHeight)
+      || documentHeight <= 0
+    ) {
+      return [];
+    }
 
-    return {
+    return [{
       ...event,
-      clickX: Number(event.clickX ?? 0),
-      clickY: Number(event.clickY ?? 0),
-      normalizedX: Math.min(100, Math.max(0, (Number(event.clickX || 0) / documentWidth) * 100)),
-      normalizedY: Math.min(100, Math.max(0, (Number(event.clickY || 0) / documentHeight) * 100)),
-    };
+      clickX,
+      clickY,
+      normalizedX: Math.min(100, Math.max(0, (clickX / documentWidth) * 100)),
+      normalizedY: Math.min(100, Math.max(0, (clickY / documentHeight) * 100)),
+    }];
   });
 
   return { data: normalized, total };
@@ -206,35 +244,44 @@ export async function getOverview({ websiteId, from, to }: { websiteId?: string;
   const dateMatch = buildDateMatch({ from, to });
   Object.assign(match, dateMatch);
 
-  const totals = await EventModel.aggregate([
+  const [result] = await EventModel.aggregate([
     { $match: match },
     {
-      $group: {
-        _id: null,
-        totalEvents: { $sum: 1 },
-        pageViews: {
-          $sum: { $cond: [{ $eq: ['$eventType', 'page_view'] }, 1, 0] },
-        },
-        clicks: {
-          $sum: { $cond: [{ $eq: ['$eventType', 'click'] }, 1, 0] },
-        },
-        sessions: { $addToSet: '$sessionId' },
-        pages: { $addToSet: '$pageUrl' },
+      $facet: {
+        metrics: [{
+          $group: {
+            _id: null,
+            totalEvents: { $sum: 1 },
+            pageViews: { $sum: { $cond: [{ $eq: ['$eventType', 'page_view'] }, 1, 0] } },
+            clicks: { $sum: { $cond: [{ $eq: ['$eventType', 'click'] }, 1, 0] } },
+          },
+        }, { $project: { _id: 0 } }],
+        sessions: [
+          { $group: { _id: { websiteId: '$websiteId', sessionId: '$sessionId' } } },
+          { $count: 'count' },
+        ],
+        pages: [
+          { $group: { _id: { websiteId: '$websiteId', pageUrl: '$pageUrl' } } },
+          { $count: 'count' },
+        ],
       },
     },
     {
       $project: {
-        _id: 0,
-        totalEvents: 1,
-        pageViews: 1,
-        clicks: 1,
-        totalSessions: { $size: '$sessions' },
-        uniquePages: { $size: '$pages' },
+        metrics: { $arrayElemAt: ['$metrics', 0] },
+        totalSessions: { $ifNull: [{ $arrayElemAt: ['$sessions.count', 0] }, 0] },
+        uniquePages: { $ifNull: [{ $arrayElemAt: ['$pages.count', 0] }, 0] },
       },
     },
   ]);
 
-  const summary = totals[0] || { totalEvents: 0, pageViews: 0, clicks: 0, totalSessions: 0, uniquePages: 0 };
+  const summary = {
+    totalEvents: result?.metrics?.totalEvents || 0,
+    pageViews: result?.metrics?.pageViews || 0,
+    clicks: result?.metrics?.clicks || 0,
+    totalSessions: result?.totalSessions || 0,
+    uniquePages: result?.uniquePages || 0,
+  };
   const clickThroughRate = summary.pageViews > 0 ? (summary.clicks / summary.pageViews) * 100 : 0;
 
   return {

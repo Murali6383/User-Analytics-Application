@@ -2,6 +2,7 @@ import { Schema, model } from 'mongoose';
 
 const eventSchema = new Schema(
   {
+    eventId: { type: String, required: false },
     websiteId: { type: String, required: true, index: true },
     sessionId: { type: String, required: true, index: true },
     eventType: {
@@ -30,5 +31,9 @@ const eventSchema = new Schema(
 eventSchema.index({ websiteId: 1, sessionId: 1, timestamp: 1 });
 eventSchema.index({ websiteId: 1, pageUrl: 1, eventType: 1, timestamp: -1 });
 eventSchema.index({ websiteId: 1, eventType: 1, timestamp: -1 });
+eventSchema.index(
+  { websiteId: 1, eventId: 1 },
+  { unique: true, partialFilterExpression: { eventId: { $type: 'string' } } },
+);
 
 export const EventModel = model('Event', eventSchema);

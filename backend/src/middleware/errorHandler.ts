@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
+import mongoose from 'mongoose';
 import { ZodError } from 'zod';
 
 export function errorHandler(err: any, _req: Request, res: Response, _next: NextFunction) {
@@ -10,16 +11,20 @@ export function errorHandler(err: any, _req: Request, res: Response, _next: Next
     });
   }
 
-  const statusCode = err.statusCode || err.status || 500;
-  const message = process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message || 'Something went wrong';
+  const databaseUnavailable = mongoose.connection.readyState !== 1
+    && typeof err?.name === 'string'
+    && (err.name.startsWith('Mongo') || err.name.startsWith('Mongoose'));
+  const statusCode = databaseUnavailable ? 503 : err.statusCode || err.status || 500;
+  const message = statusCode >= 500 ? 'Service temporarily unavailable' : err.message || 'Request failed';
 
   if (statusCode >= 500) {
     console.error('InsightTrack request failed:', err);
   }
 
+  if (statusCode === 503) res.setHeader('Retry-After', '5');
   return res.status(statusCode).json({
     success: false,
     error: message,
-    details: process.env.NODE_ENV === 'production' ? undefined : err.details || undefined,
+    details: statusCode >= 500 ? undefined : err.details || undefined,
   });
 }
