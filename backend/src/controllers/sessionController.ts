@@ -31,15 +31,20 @@ export async function getSessionsController(req: Request, res: Response, next: N
 
 export async function getSessionEventsController(req: Request, res: Response, next: NextFunction) {
   try {
-    const page = Number(req.query.page || 1);
-    const limit = Number(req.query.limit || 20);
+    const query = queryPaginationSchema.parse({
+      page: req.query.page,
+      limit: req.query.limit,
+      websiteId: req.query.websiteId,
+      from: req.query.from,
+      to: req.query.to,
+    });
     const result = await getSessionEvents({
       sessionId: String(req.params.sessionId),
-      websiteId: typeof req.query.websiteId === 'string' ? req.query.websiteId : undefined,
-      from: typeof req.query.from === 'string' ? req.query.from : undefined,
-      to: typeof req.query.to === 'string' ? req.query.to : undefined,
-      page,
-      limit,
+      websiteId: query.websiteId,
+      from: query.from,
+      to: query.to,
+      page: query.page,
+      limit: query.limit,
     });
 
     if (!result.data.length) {

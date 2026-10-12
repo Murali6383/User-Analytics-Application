@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { notFoundHandler } from './middleware/notFound.js';
-import { apiRateLimiter } from './middleware/rateLimit.js';
+import { apiRateLimiter, eventRateLimiter } from './middleware/rateLimit.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { analyticsRoutes } from './routes/analyticsRoutes.js';
 import { eventRoutes } from './routes/eventRoutes.js';
@@ -16,13 +16,17 @@ app.use(helmet());
 app.use(cors({ origin: env.frontendOrigin, credentials: true }));
 app.use(requestLogger);
 app.use(express.json({ limit: '1mb' }));
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 app.use('/api', apiRateLimiter);
 
 app.get('/api', (_req, res) => {
   res.json({ success: true, message: 'InsightTrack API ready' });
 });
 
-app.use('/api/events', eventRoutes);
+app.use('/api/events', eventRateLimiter, eventRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api', analyticsRoutes);
 

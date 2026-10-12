@@ -1,0 +1,96 @@
+import request from 'supertest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const services = vi.hoisted(() => ({
+  createEvent: vi.fn(),
+  getHeatmap: vi.fn(),
+  getOverview: vi.fn(),
+  getPageAnalytics: vi.fn(),
+  getSessionEvents: vi.fn(),
+  getSessionSummaries: vi.fn(),
+  getTrendData: vi.fn(),
+}));
+
+vi.mock('../src/services/eventService.js', () => services);
+
+import { app } from '../src/app.js';
+
+describe('analytics API routes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    services.getOverview.mockResolvedValue({
+      totalSessions: 2,
+      totalEvents: 4,
+      pageViews: 2,
+      clicks: 2,
+      uniquePages: 2,
+      clickThroughRate: 100,
+    });
+    services.getTrendData.mockResolvedValue([
+      { date: '2026-10-12', totalEvents: 4, pageViews: 2, clicks: 2 },
+    ]);
+    services.getSessionSummaries.mockResolvedValue({
+      data: [],
+      pagination: { page: 1, limit: 10, total: 0, totalPages: 0 },
+    });
+    services.getSessionEvents.mockResolvedValue({
+      data: [],
+      pagination: { page: 1, limit: 40, total: 0, totalPages: 0 },
+    });
+    services.getHeatmap.mockResolvedValue({ data: [], total: 0 });
+  });
+
+  it('serves the dashboard overview at /api/analytics/overview', async () => {
+    const response = await request(app)
+      .get('/api/analytics/overview?websiteId=demo-store')
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      success: true,
+      totalSessions: 2,
+      totalEvents: 4,
+      pageViews: 2,
+      clicks: 2,
+      uniquePages: 2,
+      clickThroughRate: 100,
+      trend: [{ date: '2026-10-12', totalEvents: 4, pageViews: 2, clicks: 2 }],
+    });
+    expect(services.getOverview).toHaveBeenCalledWith({
+      websiteId: 'demo-store',
+      from: undefined,
+      to: undefined,
+    });
+    expect(services.createEvent).not.toHaveBeenCalled();
+  });
+
+  it('keeps the existing sessions and heatmap response contracts', async () => {
+    const sessions = await request(app)
+      .get('/api/sessions?websiteId=demo-store&page=1&limit=10')
+      .expect(200);
+    expect(sessions.body).toMatchObject({
+      success: true,
+      data: [],
+      pagination: { page: 1, limit: 10, total: 0, totalPages: 0 },
+    });
+
+    const heatmap = await request(app)
+      .get(`/api/heatmap?websiteId=demo-store&pageUrl=${encodeURIComponent('http://localhost:5173/store/products')}&limit=40`)
+      .expect(200);
+    expect(heatmap.body).toMatchObject({ success: true, data: [], total: 0 });
+    expect(services.getHeatmap).toHaveBeenCalledWith(expect.objectContaining({
+      websiteId: 'demo-store',
+      pageUrl: 'http://localhost:5173/store/products',
+      limit: 40,
+    }));
+    expect(services.createEvent).not.toHaveBeenCalled();
+  });
+
+  it('returns a 400 JSON error for invalid heatmap parameters', async () => {
+    const response = await request(app)
+      .get('/api/heatmap?websiteId=demo-store&pageUrl=not-a-url')
+      .expect(400);
+
+    expect(response.body.success).toBe(false);
+    expect(response.body.error).toBe('Invalid request');
+  });
+});

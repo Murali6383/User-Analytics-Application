@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Link, NavLink, Route, Routes, useParams } from 'react-router-dom';
 import {
   Activity,
@@ -11,6 +11,7 @@ import {
   LayoutDashboard,
   Monitor,
   Package,
+  RefreshCw,
   Search,
   ShoppingBag,
   ShoppingCart,
@@ -19,16 +20,78 @@ import {
   Users,
 } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { apiFetch } from './lib/api';
+import { API_BASE, apiFetch } from './lib/api';
 import { products } from './data/products';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+type TrendPoint = { date: string; totalEvents: number; pageViews: number; clicks: number };
+type Overview = {
+  totalSessions: number;
+  totalEvents: number;
+  pageViews: number;
+  clicks: number;
+  uniquePages: number;
+  clickThroughRate: number;
+  trend: TrendPoint[];
+};
+type SessionSummary = {
+  sessionId: string;
+  firstSeen: string;
+  lastSeen: string;
+  totalEvents: number;
+  pageViews: number;
+  clicks: number;
+  uniquePages: number;
+};
+type TrackedEvent = {
+  _id: string;
+  eventType: 'page_view' | 'click';
+  timestamp: string;
+  pageUrl: string;
+  clickX?: number;
+  clickY?: number;
+  elementTag?: string;
+};
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'An unexpected error occurred.';
+}
 
 const sidebarItems = [
   { label: 'Overview', to: '/dashboard', icon: LayoutDashboard },
   { label: 'Sessions', to: '/dashboard/sessions', icon: Users },
   { label: 'Store Demo', to: '/store', icon: ShoppingBag },
 ];
+
+type Tracker = {
+  init: (config: { apiUrl: string; websiteId: string; respectDoNotTrack: boolean; development: boolean; ignorePaths: string[] }) => { enabled: boolean };
+  isOptedOut: () => boolean;
+};
+
+let trackingSdkPromise: Promise<void> | null = null;
+
+function loadTrackingSdk() {
+  const tracker = (window as Window & { InsightTrack?: Tracker }).InsightTrack;
+  if (tracker) return Promise.resolve();
+  if (trackingSdkPromise) return trackingSdkPromise;
+
+  trackingSdkPromise = new Promise<void>((resolve, reject) => {
+    const script = document.querySelector<HTMLScriptElement>('script[data-insighttrack-sdk]') || document.createElement('script');
+    script.src = '/sdk/insighttrack.js';
+    script.async = true;
+    script.dataset.insighttrackSdk = 'true';
+    script.addEventListener('load', () => {
+      if ((window as Window & { InsightTrack?: Tracker }).InsightTrack) resolve();
+      else reject(new Error('The tracking SDK loaded but did not expose InsightTrack.'));
+    }, { once: true });
+    script.addEventListener('error', () => reject(new Error(`Failed to load ${script.src}.`)), { once: true });
+    if (!script.isConnected) document.head.appendChild(script);
+  }).catch((error: unknown) => {
+    trackingSdkPromise = null;
+    throw error;
+  });
+
+  return trackingSdkPromise;
+}
 
 function shortId(value: string) {
   if (!value) return '—';
@@ -59,48 +122,73 @@ function StatCard({ label, value, accent }: { label: string; value: string; acce
   );
 }
 
-function HeatmapPanel() {
-  const [points, setPoints] = useState<any[]>([]);
+function HeatmapPanel({ refreshToken }: { refreshToken: number }) {
+  const [points, setPoints] = useState<Array<{ _id: string; clickX: number; clickY: number; normalizedX: number; normalizedY: number }>>([]);
   const [pageUrl, setPageUrl] = useState(() => `${window.location.origin}/store/products`);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [total, setTotal] = useState(0);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
+    let active = true;
     const load = async () => {
+      setLoading(true);
+      setError('');
       try {
-        const data = await apiFetch<{ data: any[]; total: number }>(`/heatmap?websiteId=demo-store&pageUrl=${encodeURIComponent(pageUrl)}&limit=40`);
-        setPoints(data.data || []);
-      } catch {
+        const data = await apiFetch<{ data: typeof points; total: number }>(`/heatmap?websiteId=demo-store&pageUrl=${encodeURIComponent(pageUrl)}&limit=40`);
+        if (!active) return;
+        setPoints(data.data);
+        setTotal(data.total);
+      } catch (loadError) {
+        if (!active) return;
+        setError(errorMessage(loadError));
         setPoints([]);
       }
+      if (active) setLoading(false);
     };
 
-    load();
-  }, [pageUrl]);
+    void load();
+    return () => { active = false; };
+  }, [pageUrl, refreshToken, retry]);
 
   return (
     <div className="card">
       <div className="mb-4 flex items-center justify-between">
         <div>
           <p className="text-sm font-medium text-slate-500">Heatmap</p>
-          <h3 className="text-lg font-semibold text-slate-900">Click intensity</h3>
+          <h3 className="text-lg font-semibold text-slate-900">Click intensity {loading ? '' : `(${total})`}</h3>
         </div>
-        <select
-          value={pageUrl}
-          onChange={(event) => setPageUrl(event.target.value)}
-          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
-        >
-          <option value={`${window.location.origin}/store/products`}>Product Listing</option>
-          <option value={`${window.location.origin}/store`}>Home</option>
-          <option value={`${window.location.origin}/store/cart`}>Cart</option>
-        </select>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setRetry((value) => value + 1)} className="rounded-lg border border-slate-200 p-2 text-slate-600" aria-label="Refresh heatmap">
+            <RefreshCw size={15} />
+          </button>
+          <select
+            value={pageUrl}
+            onChange={(event) => setPageUrl(event.target.value)}
+            className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
+          >
+            <option value={`${window.location.origin}/store/products`}>Product Listing</option>
+            <option value={`${window.location.origin}/store`}>Home</option>
+            <option value={`${window.location.origin}/store/cart`}>Cart</option>
+          </select>
+        </div>
       </div>
 
       <div className="relative h-72 overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-slate-100">
-        {points.length === 0 ? (
+        {loading ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-500">Loading click data…</div>
+        ) : error ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-rose-700">
+            <span>Could not load heatmap: {error}</span>
+            <button onClick={() => setRetry((value) => value + 1)} className="font-medium underline">Retry</button>
+          </div>
+        ) : points.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-slate-500">No clicks yet for this page.</div>
         ) : (
           points.map((point, index) => (
             <span
-              key={`${point._id || index}-${index}`}
+              key={`${point._id}-${index}`}
               className="absolute h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand-500/80 shadow-lg shadow-brand-500/20"
               style={{
                 left: `${Math.min(Math.max(point.normalizedX || 0, 2), 98)}%`,
@@ -116,29 +204,36 @@ function HeatmapPanel() {
 }
 
 function DashboardOverview() {
-  const [summary, setSummary] = useState<any>(null);
+  const [summary, setSummary] = useState<Overview | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [refreshToken, setRefreshToken] = useState(0);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   useEffect(() => {
+    let active = true;
     const load = async () => {
+      setLoading(true);
+      setError('');
       try {
-        const response = await apiFetch<any>(`/analytics/overview?websiteId=demo-store`);
+        const response = await apiFetch<Overview>(`/analytics/overview?websiteId=demo-store`);
+        if (!active) return;
         setSummary(response);
-      } catch {
-        setSummary({
-          totalSessions: 0,
-          totalEvents: 0,
-          pageViews: 0,
-          clicks: 0,
-          uniquePages: 0,
-          clickThroughRate: 0,
-          trend: [],
-          error: true,
-        });
+        setLastRefresh(new Date());
+      } catch (loadError) {
+        if (!active) return;
+        setError(errorMessage(loadError));
       }
+      if (active) setLoading(false);
     };
 
-    load();
-  }, []);
+    void load();
+    const interval = window.setInterval(load, 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [refreshToken]);
 
   const chartData = summary?.trend || [];
 
@@ -149,19 +244,26 @@ function DashboardOverview() {
           <p className="text-sm uppercase tracking-[0.2em] text-slate-500">Performance overview</p>
           <h1 className="text-3xl font-semibold tracking-tight text-slate-900">Website analytics</h1>
         </div>
-        <div className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
-          Last refresh: {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        <div className="flex items-center gap-3">
+          <div className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
+            Last refresh: {lastRefresh?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) || '—'}
+          </div>
+          <button onClick={() => setRefreshToken((value) => value + 1)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700" disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
         </div>
       </div>
 
+      {error ? <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">Could not load analytics: {error}</div> : null}
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <StatCard label="Sessions" value={formatNumber(summary?.totalSessions || 0)} accent="bg-sky-50 text-sky-700" />
-        <StatCard label="Events" value={formatNumber(summary?.totalEvents || 0)} accent="bg-violet-50 text-violet-700" />
-        <StatCard label="Page views" value={formatNumber(summary?.pageViews || 0)} accent="bg-emerald-50 text-emerald-700" />
-        <StatCard label="Clicks" value={formatNumber(summary?.clicks || 0)} accent="bg-amber-50 text-amber-700" />
-        <StatCard label="Unique pages" value={formatNumber(summary?.uniquePages || 0)} accent="bg-rose-50 text-rose-700" />
-        <StatCard label="CTR" value={`${(summary?.clickThroughRate || 0).toFixed(2)}%`} accent="bg-indigo-50 text-indigo-700" />
+        <StatCard label="Sessions" value={summary ? formatNumber(summary.totalSessions) : '—'} accent="bg-sky-50 text-sky-700" />
+        <StatCard label="Events" value={summary ? formatNumber(summary.totalEvents) : '—'} accent="bg-violet-50 text-violet-700" />
+        <StatCard label="Page views" value={summary ? formatNumber(summary.pageViews) : '—'} accent="bg-emerald-50 text-emerald-700" />
+        <StatCard label="Clicks" value={summary ? formatNumber(summary.clicks) : '—'} accent="bg-amber-50 text-amber-700" />
+        <StatCard label="Unique pages" value={summary ? formatNumber(summary.uniquePages) : '—'} accent="bg-rose-50 text-rose-700" />
+        <StatCard label="CTR" value={summary ? `${summary.clickThroughRate.toFixed(2)}%` : '—'} accent="bg-indigo-50 text-indigo-700" />
       </div>
+      {loading && !summary ? <p className="text-sm text-slate-500">Loading analytics…</p> : null}
 
       <div className="grid gap-6 xl:grid-cols-[1.7fr_1fr]">
         <div className="card">
@@ -170,14 +272,18 @@ function DashboardOverview() {
               <p className="text-sm font-medium text-slate-500">Trend</p>
               <h2 className="text-xl font-semibold text-slate-900">Event volume</h2>
             </div>
-            <span className="flex items-center gap-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+            <span className={`flex items-center gap-2 rounded-full px-2 py-1 text-xs font-medium ${error ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
               <TrendingUp size={12} />
-              Live data
+              {error ? 'Unavailable' : loading ? 'Loading' : 'Live data'}
             </span>
           </div>
 
           <div className="h-72">
-            {chartData.length ? (
+            {error ? (
+              <div className="flex h-full items-center justify-center text-sm text-rose-600">Trend data is unavailable.</div>
+            ) : loading && !summary ? (
+              <div className="flex h-full items-center justify-center text-sm text-slate-500">Loading event data…</div>
+            ) : chartData.length ? (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData}>
                   <defs>
@@ -199,26 +305,41 @@ function DashboardOverview() {
           </div>
         </div>
 
-        <HeatmapPanel />
+        <HeatmapPanel refreshToken={refreshToken} />
       </div>
     </div>
   );
 }
 
 function DashboardSessions() {
-  const [sessions, setSessions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [lastPage, setLastPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
+    let active = true;
     const load = async () => {
-      const response = await apiFetch<any>(`/sessions?websiteId=demo-store&page=${page}&limit=10`);
+      setLoading(true);
+      setError('');
+      try {
+      const response = await apiFetch<{ data: SessionSummary[]; pagination?: { totalPages: number } }>(`/sessions?websiteId=demo-store&page=${page}&limit=10`);
+      if (!active) return;
       setSessions(response.data || []);
       setLastPage(response.pagination?.totalPages || 1);
+      } catch (loadError) {
+        if (!active) return;
+        setError(errorMessage(loadError));
+        setSessions([]);
+      }
+      if (active) setLoading(false);
     };
-    load();
-  }, [page]);
+    void load();
+    return () => { active = false; };
+  }, [page, retry]);
 
   const filtered = sessions.filter((session) => session.sessionId.toLowerCase().includes(search.toLowerCase()));
 
@@ -238,8 +359,12 @@ function DashboardSessions() {
             placeholder="Search session ID"
           />
         </div>
+        <button onClick={() => setRetry((value) => value + 1)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700" disabled={loading}>
+          <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
+        </button>
       </div>
 
+      {error ? <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">Could not load sessions: {error}</div> : null}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full text-left">
@@ -256,9 +381,11 @@ function DashboardSessions() {
               </tr>
             </thead>
             <tbody>
-              {filtered.length === 0 ? (
+              {loading ? (
+                <tr><td className="px-4 py-8 text-sm text-slate-500" colSpan={8}>Loading sessions…</td></tr>
+              ) : filtered.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-8 text-sm text-slate-500" colSpan={8}>No sessions match the current filter.</td>
+                  <td className="px-4 py-8 text-sm text-slate-500" colSpan={8}>{error ? 'Session data is unavailable.' : 'No sessions match the current filter.'}</td>
                 </tr>
               ) : (
                 filtered.map((session) => (
@@ -268,7 +395,7 @@ function DashboardSessions() {
                         <span className="font-medium text-slate-900">{shortId(session.sessionId)}</span>
                         <button
                           className="inline-flex items-center rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 hover:border-brand-500 hover:text-brand-600"
-                          onClick={() => navigator.clipboard.writeText(session.sessionId)}
+                          onClick={() => { void navigator.clipboard?.writeText(session.sessionId).catch((copyError) => console.error('Could not copy session ID:', copyError)); }}
                           aria-label="Copy session ID"
                         >
                           <Copy size={14} />
@@ -317,29 +444,57 @@ function DashboardSessions() {
 
 function DashboardSessionDetail() {
   const { sessionId } = useParams();
-  const [events, setEvents] = useState<any[]>([]);
+  const [events, setEvents] = useState<TrackedEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
+    let active = true;
     const load = async () => {
-      if (!sessionId) return;
-      const response = await apiFetch<any>(`/sessions/${encodeURIComponent(sessionId)}/events?websiteId=demo-store&page=1&limit=40`);
-      setEvents(response.data || []);
+      if (!sessionId) {
+        setEvents([]);
+        setError('A session ID is required.');
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      setError('');
+      try {
+        const response = await apiFetch<{ data: TrackedEvent[] }>(`/sessions/${encodeURIComponent(sessionId)}/events?websiteId=demo-store&page=1&limit=40`);
+        if (!active) return;
+        setEvents(response.data || []);
+      } catch (loadError) {
+        if (!active) return;
+        setError(errorMessage(loadError));
+        setEvents([]);
+      }
+      if (active) setLoading(false);
     };
 
-    load();
-  }, [sessionId]);
+    void load();
+    return () => { active = false; };
+  }, [sessionId, retry]);
 
   return (
     <div className="space-y-6">
       <div>
         <p className="text-sm uppercase tracking-[0.2em] text-slate-500">Journey</p>
-        <h1 className="text-3xl font-semibold tracking-tight text-slate-900">Session {shortId(sessionId || '')}</h1>
+        <div className="flex items-center justify-between">
+          <h1 className="text-3xl font-semibold tracking-tight text-slate-900">Session {shortId(sessionId || '')}</h1>
+          <button onClick={() => setRetry((value) => value + 1)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700" disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+        </div>
       </div>
 
+      {error ? <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">Could not load session events: {error}</div> : null}
       <div className="card">
         <div className="space-y-4">
-          {events.length === 0 ? (
-            <div className="text-sm text-slate-500">No events available for this session.</div>
+          {loading ? (
+            <div className="text-sm text-slate-500">Loading session events…</div>
+          ) : events.length === 0 ? (
+            <div className="text-sm text-slate-500">{error ? 'Session events are unavailable.' : 'No events available for this session.'}</div>
           ) : (
             events.map((event, index) => (
               <div key={`${event._id || index}`} className="flex gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -396,17 +551,10 @@ function StorefrontHome() {
             </div>
           </div>
           <div className="grid w-full max-w-md gap-4 md:grid-cols-2">
-            <div className="rounded-2xl bg-white/8 p-4 backdrop-blur-sm">
-              <p className="text-sm text-slate-300">Active sessions</p>
-              <p className="mt-2 text-3xl font-semibold">1,248</p>
-            </div>
-            <div className="rounded-2xl bg-white/8 p-4 backdrop-blur-sm">
-              <p className="text-sm text-slate-300">CTR</p>
-              <p className="mt-2 text-3xl font-semibold">7.4%</p>
-            </div>
             <div className="rounded-2xl bg-white/8 p-4 backdrop-blur-sm md:col-span-2">
-              <p className="text-sm text-slate-300">Top conversion path</p>
+              <p className="text-sm text-slate-300">Track the complete shopper journey</p>
               <p className="mt-2 text-xl font-semibold">Home → Product list → Detail → Cart</p>
+              <p className="mt-2 text-sm text-slate-300">Live session and click data appears in your dashboard.</p>
             </div>
           </div>
         </div>
@@ -592,41 +740,43 @@ function StorefrontCart() {
 }
 
 function AppShell() {
-  const [mounted, setMounted] = useState(false);
+  const [trackingError, setTrackingError] = useState('');
 
   useEffect(() => {
-    setMounted(true);
-    const script = document.createElement('script');
-    script.src = '/sdk/insighttrack.js';
-    script.async = true;
-    script.dataset.insighttrackSdk = 'true';
-    document.body.appendChild(script);
-
-    const initialize = () => {
-      const tracker = (window as any).InsightTrack;
-      if (tracker) {
-        tracker.init({
-          apiUrl: API_BASE,
-          websiteId: 'demo-store',
-          respectDoNotTrack: true,
-        });
+    let active = true;
+    void loadTrackingSdk().then(() => {
+      if (!active) return;
+      const tracker = (window as Window & { InsightTrack?: Tracker }).InsightTrack;
+      if (!tracker) throw new Error('InsightTrack is unavailable after the SDK loaded.');
+      const config = tracker.init({
+        apiUrl: API_BASE,
+        websiteId: 'demo-store',
+        respectDoNotTrack: true,
+        development: import.meta.env.DEV,
+        ignorePaths: ['/dashboard'],
+      });
+      if (!config.enabled && !tracker.isOptedOut()) {
+        throw new Error('InsightTrack initialization did not enable event collection.');
       }
-    };
-
-    if (document.readyState === 'complete') {
-      initialize();
-    } else {
-      window.addEventListener('load', initialize, { once: true });
-    }
-
+      setTrackingError('');
+    }).catch((error: unknown) => {
+      if (!active) return;
+      console.error('InsightTrack could not start:', error);
+      setTrackingError(errorMessage(error));
+    });
     return () => {
-      if (script.parentNode) script.parentNode.removeChild(script);
+      active = false;
     };
   }, []);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-7xl px-4 py-6 lg:px-8">
+        {trackingError && import.meta.env.DEV ? (
+          <div role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            Analytics tracking could not start: {trackingError}
+          </div>
+        ) : null}
         <header className="panel mb-6 flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-brand-100 text-brand-700">

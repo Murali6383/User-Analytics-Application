@@ -37,10 +37,19 @@ export const trackingEventSchema = z
     }
   });
 
-export const queryPaginationSchema = z.object({
+export const analyticsFilterSchema = z.object({
+  websiteId: z.string().trim().min(1).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+});
+
+export const queryPaginationSchema = analyticsFilterSchema.extend({
   page: z.coerce.number().int().min(1).optional().default(1),
   limit: z.coerce.number().int().min(1).max(200).optional().default(20),
-  websiteId: z.string().trim().optional(),
-  from: z.string().optional(),
-  to: z.string().optional(),
+});
+
+export const heatmapQuerySchema = analyticsFilterSchema.extend({
+  websiteId: z.string().trim().min(1),
+  pageUrl: urlSchema,
+  limit: z.coerce.number().int().min(1).max(200).optional().default(200),
 });

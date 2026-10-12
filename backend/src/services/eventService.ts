@@ -2,6 +2,31 @@ import type { FilterQuery } from 'mongoose';
 import { EventModel } from '../models/Event.js';
 
 const DEFAULT_PAGE_SIZE = 20;
+const SENSITIVE_QUERY_KEYS = /^(?:token|access_token|refresh_token|auth|authorization|password|passwd|email|phone|mobile|ssn|secret|code)$/i;
+
+function normalizePageUrl(value: string) {
+  const url = new URL(value);
+  url.hash = '';
+  if (url.pathname !== '/') {
+    url.pathname = url.pathname.replace(/\/+$/, '');
+  }
+  for (const key of Array.from(url.searchParams.keys())) {
+    if (SENSITIVE_QUERY_KEYS.test(key)) {
+      url.searchParams.set(key, '[redacted]');
+    }
+  }
+  return url.href;
+}
+
+function pageUrlMatch(value: string) {
+  const normalized = normalizePageUrl(value);
+  const url = new URL(normalized);
+  const legacyTrailingSlash = new URL(normalized);
+  if (legacyTrailingSlash.pathname !== '/') {
+    legacyTrailingSlash.pathname += '/';
+  }
+  return { $in: [normalized, legacyTrailingSlash.href] };
+}
 
 function buildDateMatch(filters: { from?: string; to?: string }) {
   const dateMatch: Record<string, any> = {};
@@ -15,9 +40,17 @@ function buildDateMatch(filters: { from?: string; to?: string }) {
   return Object.keys(dateMatch).length > 0 ? { timestamp: dateMatch } : {};
 }
 
-export async function createEvent(payload: any) {
+export async function createEvent(payload: {
+  websiteId: string;
+  sessionId: string;
+  eventType: 'page_view' | 'click';
+  pageUrl: string;
+  timestamp: string;
+  [key: string]: unknown;
+}) {
   const event = await EventModel.create({
     ...payload,
+    pageUrl: normalizePageUrl(payload.pageUrl),
     timestamp: new Date(payload.timestamp),
   });
 
@@ -70,7 +103,7 @@ export async function getSessionSummaries({ websiteId, from, to, page, limit }: 
   const sessions = await EventModel.aggregate(pipeline);
   const totalSessions = await EventModel.aggregate([
     { $match: match },
-    { $group: { _id: '$sessionId' } },
+    { $group: { _id: { websiteId: '$websiteId', sessionId: '$sessionId' } } },
     { $count: 'count' },
   ]);
 
@@ -141,29 +174,30 @@ export async function getPageAnalytics({ websiteId, from, to }: { websiteId?: st
 }
 
 export async function getHeatmap({ websiteId, pageUrl, from, to, limit = 200 }: { websiteId: string; pageUrl: string; from?: string; to?: string; limit?: number }) {
-  const match: Record<string, any> = { websiteId, pageUrl, eventType: 'click' };
+  const match: Record<string, any> = { websiteId, pageUrl: pageUrlMatch(pageUrl), eventType: 'click' };
   const dateMatch = buildDateMatch({ from, to });
   Object.assign(match, dateMatch);
 
+  const total = await EventModel.countDocuments(match);
   const events = await EventModel.find(match)
     .sort({ timestamp: -1 })
     .limit(limit)
     .lean();
 
   const normalized = events.map((event: any) => {
-    const documentWidth = Number(event.documentWidth || 0) || 1;
-    const documentHeight = Number(event.documentHeight || 0) || 1;
+    const documentWidth = Math.max(Number(event.documentWidth || 0), Number(event.viewportWidth || 0), 1);
+    const documentHeight = Math.max(Number(event.documentHeight || 0), Number(event.viewportHeight || 0), 1);
 
     return {
       ...event,
       clickX: Number(event.clickX ?? 0),
       clickY: Number(event.clickY ?? 0),
-      normalizedX: documentWidth > 0 ? (Number(event.clickX || 0) / documentWidth) * 100 : 0,
-      normalizedY: documentHeight > 0 ? (Number(event.clickY || 0) / documentHeight) * 100 : 0,
+      normalizedX: Math.min(100, Math.max(0, (Number(event.clickX || 0) / documentWidth) * 100)),
+      normalizedY: Math.min(100, Math.max(0, (Number(event.clickY || 0) / documentHeight) * 100)),
     };
   });
 
-  return { data: normalized, total: normalized.length };
+  return { data: normalized, total };
 }
 
 export async function getOverview({ websiteId, from, to }: { websiteId?: string; from?: string; to?: string }) {

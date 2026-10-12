@@ -1,4 +1,9 @@
 (function () {
+  const SESSION_KEY = 'insighttrack_session_id';
+  const LAST_SEEN_KEY = 'insighttrack_session_last_seen';
+  const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+  const SENSITIVE_QUERY_KEYS = /(?:token|auth|password|passwd|email|phone|mobile|ssn|secret|code|api[_-]?key|jwt|user(?:name|id)?|customer(?:name|id)?|first[_-]?name|last[_-]?name|address|birth(?:day|date)?|dob|postal|zip)/i;
+
   function createUuid() {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) {
       return crypto.randomUUID();
@@ -9,7 +14,7 @@
       crypto.getRandomValues(bytes);
       bytes[6] = (bytes[6] & 0x0f) | 0x40;
       bytes[8] = (bytes[8] & 0x3f) | 0x80;
-      const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
       return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
     }
 
@@ -20,7 +25,7 @@
     });
   }
 
-  function getSessionStorageValue(key) {
+  function storageGet(key) {
     try {
       return sessionStorage.getItem(key);
     } catch {
@@ -28,232 +33,268 @@
     }
   }
 
-  function setSessionStorageValue(key, value) {
+  function storageSet(key, value) {
     try {
       sessionStorage.setItem(key, value);
-    } catch {
-      // Ignore storage errors; cookie fallback remains.
+    } catch (error) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('InsightTrack: session storage is unavailable.', error);
+      }
     }
+  }
+
+  function canonicalPageUrl(value) {
+    const url = new URL(value, window.location.href);
+    url.hash = '';
+    if (url.pathname !== '/') {
+      url.pathname = url.pathname.replace(/\/+$/, '');
+    }
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (SENSITIVE_QUERY_KEYS.test(key)) {
+        url.searchParams.set(key, '[redacted]');
+      }
+    }
+    return url.href;
   }
 
   function readSessionId() {
-    const stored = getSessionStorageValue('insighttrack_session_id');
+    const stored = storageGet(SESSION_KEY);
     if (stored) return stored;
 
-    const cookie = document.cookie
-      .split('; ')
-      .map((entry) => entry.split('='))
+    const entry = document.cookie
+      .split(';')
+      .map((part) => part.trim().split('='))
       .find(([name]) => name === 'insighttrack_session');
+    if (!entry) return null;
 
-    return cookie ? decodeURIComponent(cookie[1]) : null;
+    try {
+      return decodeURIComponent(entry.slice(1).join('='));
+    } catch {
+      return null;
+    }
   }
 
   function writeSessionId(sessionId) {
-    setSessionStorageValue('insighttrack_session_id', sessionId);
-    const expires = new Date(Date.now() + 30 * 60 * 1000).toUTCString();
+    storageSet(SESSION_KEY, sessionId);
+    const expires = new Date(Date.now() + SESSION_TIMEOUT_MS).toUTCString();
     document.cookie = `insighttrack_session=${encodeURIComponent(sessionId)}; path=/; expires=${expires}; SameSite=Lax`;
   }
 
-  function getSessionAgeMs() {
-    const value = getSessionStorageValue('insighttrack_session_last_seen');
-    if (!value) return Number.POSITIVE_INFINITY;
-    const lastSeen = Number(value);
-    return Number.isFinite(lastSeen) ? Date.now() - lastSeen : Number.POSITIVE_INFINITY;
-  }
-
   function ensureSession() {
+    const lastSeen = Number(storageGet(LAST_SEEN_KEY));
+    const expired = !Number.isFinite(lastSeen) || Date.now() - lastSeen > SESSION_TIMEOUT_MS;
     const sessionId = readSessionId();
-    const maxAgeMs = 30 * 60 * 1000;
-    const expired = getSessionAgeMs() > maxAgeMs;
-
-    if (!sessionId || expired) {
-      const fresh = createUuid();
-      writeSessionId(fresh);
-      setSessionStorageValue('insighttrack_session_last_seen', String(Date.now()));
-      return fresh;
-    }
-
-    setSessionStorageValue('insighttrack_session_last_seen', String(Date.now()));
-    return sessionId;
+    const activeSessionId = sessionId && !expired ? sessionId : createUuid();
+    writeSessionId(activeSessionId);
+    storageSet(LAST_SEEN_KEY, String(Date.now()));
+    return activeSessionId;
   }
 
-  function isOptedOut() {
-    return getSessionStorageValue('insighttrack_opt_out') === 'true';
-  }
-
-  function setOptOut(value) {
-    setSessionStorageValue('insighttrack_opt_out', String(Boolean(value)));
-  }
-
-  function validatePayload(payload) {
-    if (!payload || typeof payload !== 'object') return false;
-    if (!payload.websiteId || !payload.sessionId || !payload.pageUrl || !payload.timestamp) return false;
-    if (!['page_view', 'click'].includes(payload.eventType)) return false;
-    if (payload.eventType === 'click') {
-      const clickX = Number(payload.clickX);
-      const clickY = Number(payload.clickY);
-      if (!Number.isFinite(clickX) || !Number.isFinite(clickY) || clickX < 0 || clickY < 0) return false;
-    }
-    return true;
-  }
-
-  function buildEventPayload(config, eventType, extra = {}) {
-    const payload = {
-      websiteId: config.websiteId,
-      sessionId: config.sessionId,
-      eventType,
-      pageUrl: window.location.href,
-      timestamp: new Date().toISOString(),
-      viewportWidth: window.innerWidth || 0,
-      viewportHeight: window.innerHeight || 0,
-      documentWidth: Math.max(document.documentElement.scrollWidth || 0, document.body ? document.body.scrollWidth : 0),
-      documentHeight: Math.max(document.documentElement.scrollHeight || 0, document.body ? document.body.scrollHeight : 0),
-      pageTitle: document.title || '',
-      ...extra,
-    };
-
-    if (eventType === 'click') {
-      payload.clickX = Number(extra.clickX);
-      payload.clickY = Number(extra.clickY);
-    }
-
-    return payload;
-  }
-
-  function sendPayload(config, payload) {
-    const body = JSON.stringify(payload);
-    const url = `${config.apiUrl.replace(/\/$/, '')}/events`;
-
-    if (navigator.sendBeacon) {
-      const ok = navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
-      if (ok) return Promise.resolve({ ok: true });
-    }
-
-    return fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      keepalive: true,
-      credentials: 'omit',
-    }).then((response) => ({ ok: response.ok, status: response.status })).catch((error) => {
-      console.warn('InsightTrack: request failed.', error);
-      return { ok: false, error };
-    });
+  function isDoNotTrackEnabled() {
+    return navigator.doNotTrack === '1'
+      || navigator.doNotTrack === 'yes'
+      || window.doNotTrack === '1'
+      || window.doNotTrack === 'yes';
   }
 
   function createInstance() {
-    const state = { config: null, initialized: false, listenerAttached: false };
+    const state = {
+      config: null,
+      listenerAttached: false,
+      historyPatched: false,
+      lastPageUrl: null,
+      lastPageTrackedAt: 0,
+    };
 
-    function createConfig(config = {}) {
-      const defaultConfig = {
-        apiUrl: 'http://localhost:5000/api',
-        websiteId: 'default-site',
-        respectDoNotTrack: false,
-        optOut: false,
-      };
-
-      const merged = { ...defaultConfig, ...config };
-      if (merged.respectDoNotTrack && navigator.doNotTrack === '1') {
-        setOptOut(true);
-      }
-
-      if (merged.optOut || isOptedOut()) {
-        return { ...merged, enabled: false, sessionId: null };
-      }
-
-      return {
-        ...merged,
-        enabled: true,
-        sessionId: ensureSession(),
-      };
+    function isIgnoredPage() {
+      const pathname = window.location.pathname;
+      return (state.config.ignorePaths || []).some((path) => (
+        pathname === path || pathname.startsWith(`${path.replace(/\/$/, '')}/`)
+      ));
     }
 
-    function attachClickListener() {
-      if (state.listenerAttached || !state.config || !state.config.enabled) return;
-      state.listenerAttached = true;
+    function reportFailure(message, error) {
+      if (state.config && state.config.development && typeof console !== 'undefined') {
+        console.error(`InsightTrack: ${message}`, error);
+      }
+    }
 
-      document.addEventListener(
-        'click',
-        (event) => {
-          const target = event.target;
-          if (!(target instanceof Element)) return;
-          if (target.closest('[data-insighttrack-ignore]')) return;
+    function buildEventPayload(eventType, extra = {}) {
+      const payload = {
+        websiteId: state.config.websiteId,
+        sessionId: state.config.sessionId,
+        eventType,
+        pageUrl: canonicalPageUrl(window.location.href),
+        timestamp: new Date().toISOString(),
+      };
 
-          const element = target.closest('a, button, input, select, textarea, [data-insighttrack-id]');
-          if (!element) return;
+      if (eventType === 'click') {
+        const documentWidth = Math.max(
+          document.documentElement.scrollWidth,
+          document.documentElement.clientWidth,
+          window.innerWidth || 0,
+        );
+        const documentHeight = Math.max(
+          document.documentElement.scrollHeight,
+          document.documentElement.clientHeight,
+          window.innerHeight || 0,
+        );
+        payload.clickX = Math.max(0, Math.round(extra.pageX));
+        payload.clickY = Math.max(0, Math.round(extra.pageY));
+        payload.viewportWidth = Math.max(0, window.innerWidth || 0);
+        payload.viewportHeight = Math.max(0, window.innerHeight || 0);
+        payload.documentWidth = documentWidth;
+        payload.documentHeight = documentHeight;
+        payload.elementTag = extra.elementTag;
+      }
 
-          const clickX = typeof event.clientX === 'number' ? event.clientX : 0;
-          const clickY = typeof event.clientY === 'number' ? event.clientY : 0;
-          if (clickX < 0 || clickY < 0) return;
+      return payload;
+    }
 
-          const payload = buildEventPayload(state.config, 'click', {
-            clickX,
-            clickY,
-            elementTag: element.tagName || '',
-            elementId: element.id || element.getAttribute('data-insighttrack-id') || '',
-          });
-
-          if (!validatePayload(payload)) return;
-          sendPayload(state.config, payload).catch(() => undefined);
-        },
-        { passive: true },
-      );
+    async function sendPayload(payload) {
+      try {
+        const response = await fetch(`${state.config.apiUrl.replace(/\/$/, '')}/events`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          keepalive: true,
+          credentials: 'omit',
+        });
+        if (!response.ok) {
+          const detail = await response.text();
+          reportFailure(`event request failed with HTTP ${response.status}.`, detail);
+        }
+        return response.ok;
+      } catch (error) {
+        reportFailure('event request failed.', error);
+        return false;
+      }
     }
 
     function trackPageView() {
-      if (!state.config || !state.config.enabled) return;
-      const payload = buildEventPayload(state.config, 'page_view');
-      if (!validatePayload(payload)) return;
-      sendPayload(state.config, payload).catch(() => undefined);
+      if (!state.config || !state.config.enabled || isIgnoredPage()) return;
+      let pageUrl;
+      try {
+        pageUrl = canonicalPageUrl(window.location.href);
+      } catch (error) {
+        reportFailure('could not determine the current page URL.', error);
+        return;
+      }
+
+      if (pageUrl === state.lastPageUrl && Date.now() - state.lastPageTrackedAt < 100) return;
+      state.lastPageUrl = pageUrl;
+      state.lastPageTrackedAt = Date.now();
+      void sendPayload(buildEventPayload('page_view'));
+    }
+
+    function attachClickListener() {
+      if (state.listenerAttached || !state.config.enabled) return;
+      state.listenerAttached = true;
+      document.addEventListener('click', (event) => {
+        if (!state.config || !state.config.enabled || isIgnoredPage()) return;
+        if (!(event.target instanceof Element)) return;
+        const element = event.target.closest('a, button, [data-insighttrack-id]');
+        if (!element || element.closest('[data-insighttrack-ignore], [data-insighttrack-sensitive], form, [contenteditable="true"]')) return;
+        if (element instanceof HTMLButtonElement && element.type === 'submit' && element.form) return;
+
+        const payload = buildEventPayload('click', {
+          pageX: Number.isFinite(event.pageX) ? event.pageX : event.clientX + window.scrollX,
+          pageY: Number.isFinite(event.pageY) ? event.pageY : event.clientY + window.scrollY,
+          elementTag: element.tagName.toLowerCase(),
+        });
+        void sendPayload(payload);
+      }, { passive: true });
+    }
+
+    function attachNavigationListeners() {
+      if (state.historyPatched) return;
+      state.historyPatched = true;
+
+      const trackNavigation = () => {
+        Promise.resolve().then(trackPageView);
+      };
+      window.addEventListener('popstate', trackNavigation);
+      window.addEventListener('hashchange', trackNavigation);
+      window.addEventListener('insighttrack:navigate', trackNavigation);
+
+      for (const method of ['pushState', 'replaceState']) {
+        const original = window.history[method];
+        window.history[method] = function () {
+          const result = original.apply(this, arguments);
+          trackNavigation();
+          return result;
+        };
+      }
     }
 
     return {
       init(config = {}) {
-        if (state.initialized && state.config) {
-          return state.config;
-        }
+        if (state.config) return state.config;
 
         try {
-          state.initialized = true;
-          state.config = createConfig(config);
-          attachClickListener();
-          trackPageView();
+          const merged = {
+            apiUrl: 'http://localhost:5000/api',
+            websiteId: 'default-site',
+            respectDoNotTrack: true,
+            development: false,
+            ...config,
+          };
+          const apiUrl = new URL(merged.apiUrl, window.location.href);
+          if (typeof merged.websiteId !== 'string' || !merged.websiteId.trim() || !['http:', 'https:'].includes(apiUrl.protocol)) {
+            throw new Error('A websiteId and absolute HTTP(S) apiUrl are required.');
+          }
+          merged.websiteId = merged.websiteId.trim();
+          merged.apiUrl = apiUrl.href.replace(/\/$/, '');
+          const optedOut = storageGet('insighttrack_opt_out') === 'true';
+          const disabledByDnt = merged.respectDoNotTrack && isDoNotTrackEnabled();
+          state.config = {
+            ...merged,
+            enabled: !merged.optOut && !optedOut && !disabledByDnt,
+            sessionId: null,
+          };
+
+          if (state.config.enabled) {
+            state.config.sessionId = ensureSession();
+            attachClickListener();
+            attachNavigationListeners();
+            trackPageView();
+          }
           return state.config;
         } catch (error) {
-          console.warn('InsightTrack initialization failed safely.', error);
-          state.initialized = true;
+          reportFailure('initialization failed.', error);
           state.config = { ...config, enabled: false, sessionId: null };
           return state.config;
         }
       },
       trackPageView,
       optOut() {
-        setOptOut(true);
+        storageSet('insighttrack_opt_out', 'true');
         if (state.config) state.config.enabled = false;
       },
       optIn() {
-        setOptOut(false);
+        storageSet('insighttrack_opt_out', 'false');
         if (!state.config) {
-          state.config = createConfig({});
+          return this.init();
         }
-        if (state.config) state.config.enabled = true;
+        if (!state.config.sessionId) state.config.sessionId = ensureSession();
+        state.config.enabled = !(state.config.respectDoNotTrack && isDoNotTrackEnabled());
+        if (!state.config.enabled) return state.config;
+        attachClickListener();
+        attachNavigationListeners();
+        trackPageView();
+        return state.config;
       },
       isOptedOut() {
-        return isOptedOut();
+        return storageGet('insighttrack_opt_out') === 'true'
+          || Boolean(state.config && state.config.respectDoNotTrack && isDoNotTrackEnabled());
       },
       getConfig() {
         return state.config;
       },
-      reset() {
-        setSessionStorageValue('insighttrack_session_id', '');
-        setSessionStorageValue('insighttrack_session_last_seen', '');
-        state.listenerAttached = false;
-      },
     };
   }
 
-  const global = typeof window !== 'undefined' ? window : globalThis;
-  if (!global.InsightTrack) {
-    global.InsightTrack = createInstance();
+  if (typeof window !== 'undefined' && !window.InsightTrack) {
+    window.InsightTrack = createInstance();
   }
 })();
