@@ -15,7 +15,7 @@ flowchart LR
 ## Features
 
 - Browser SDK tracks initial page loads, SPA history changes, browser back/forward navigation, and eligible link/button clicks.
-- Stable per-tab anonymous session IDs, Do Not Track support, sensitive URL query redaction, and click coordinates relative to the document.
+- Stable per-tab anonymous session IDs, Do Not Track support, sensitive URL query redaction, and document-relative click coordinates with viewport size, scroll offsets, document size, and device pixel ratio metadata.
 - Event IDs with a MongoDB unique index make repeated submissions of the same event idempotent. The SDK does not automatically retry failed event POSTs.
 - MongoDB-backed overview and trend aggregations, page breakdown, date presets, searchable/sortable/paginated sessions, ordered event timelines, and per-page click heatmaps.
 - Dashboard routes are excluded from event collection. Analytics reads do not create events.
@@ -89,10 +89,12 @@ All API paths are under `/api`. Successful responses use JSON and analytics GET 
 | `GET /pages` | Page views and clicks grouped by canonical page URL |
 | `GET /sessions` | Paginated session summaries; supports search, sort, and date filters |
 | `GET /sessions/:sessionId/events` | Chronological, paginated session events |
-| `GET /heatmap` | Paginated click coordinates for a selected page |
+| `GET /heatmap` | Click coordinates for a selected page; optional paired `viewportWidth` and `viewportHeight` filters |
 | `GET /health` | API and MongoDB connection status |
 
-The event payload includes `eventId` (UUID), `websiteId`, `sessionId`, `eventType` (`page_view` or `click`), absolute HTTP(S) `pageUrl`, and ISO timestamp. Click events additionally require numeric `clickX` and `clickY`; the SDK records document-relative CSS pixels and includes viewport/document dimensions. A repeated `(websiteId, eventId)` returns success with `duplicate: true` and is not inserted again. Older clients may omit `eventId`; new integrations should always send it.
+The event payload includes `eventId` (UUID), `websiteId`, `sessionId`, `eventType` (`page_view` or `click`), absolute HTTP(S) `pageUrl`, and ISO timestamp. Click `clickX`/`clickY` are document-relative CSS pixels (`pageX`/`pageY`), not device pixels. Clicks also include `coordinateMode: "document"`, viewport and document dimensions, `scrollX`/`scrollY`, and `devicePixelRatio`. The SDK does not multiply CSS coordinates by device pixel ratio; scroll offsets are diagnostic metadata because page coordinates already include scrolling. The API rejects missing, non-finite, zero-dimension, and out-of-document click coordinates. A repeated `(websiteId, eventId)` returns success with `duplicate: true` and is not inserted again. Older clients may omit `eventId`; new integrations should always send it.
+
+The heatmap response includes only valid clicks for the selected canonical page and one viewport-size cohort (the most common cohort by default). It returns the available viewport breakdown, click and distinct-session counts, and an invalid-coordinate exclusion count. The frontend scales the live same-origin full-page preview to preserve aspect ratio and lets the user select another viewport cohort. Fragment identifiers are omitted; meaningful query parameters and their order are preserved, while sensitive query-key values are redacted consistently in both SDK and backend URL canonicalization. Trailing slashes are normalized except at the origin root.
 
 Analytics endpoints accept optional ISO-8601 `from` and `to` timestamps. The dashboard's 7- and 30-day presets use UTC day boundaries consistently across overview, page, heatmap, session, and journey queries. Sessions are distinct `(websiteId, sessionId)` pairs; unique pages are distinct `(websiteId, canonical pageUrl)` pairs within the selected date range. CTR is `clicks / pageViews * 100`, or zero when there are no page views.
 
@@ -106,9 +108,11 @@ Events are stored in MongoDB's `events` collection. Each document contains:
 | `websiteId`, `sessionId` | Analytics site and anonymous browsing session |
 | `eventType` | `page_view` or `click` |
 | `pageUrl`, `timestamp` | Canonical absolute URL and event time |
-| `clickX`, `clickY` | Document-relative click point; present for click events |
-| `viewportWidth`, `viewportHeight` | Browser viewport dimensions at the click |
-| `documentWidth`, `documentHeight` | Page dimensions used to normalize heatmap coordinates |
+| `clickX`, `clickY`, `coordinateMode` | Document-relative CSS-pixel point and explicit `"document"` coordinate convention |
+| `viewportWidth`, `viewportHeight` | Browser viewport dimensions at the click; used for heatmap cohorts |
+| `documentWidth`, `documentHeight` | Page dimensions used to normalize full-page heatmap coordinates |
+| `scrollX`, `scrollY` | Scroll offsets when the click occurred; retained to explain document-relative coordinates |
+| `devicePixelRatio` | Device scale metadata; coordinates remain CSS pixels |
 | `elementTag` | Clicked element type; no text or form value is collected |
 
 Indexes support website/session/time queries, website/page/type/time heatmaps, website/type/time analytics, and unique event idempotency. Mongoose manages index creation; production deployments should ensure index builds are completed before accepting ingestion.
@@ -135,6 +139,6 @@ No hosted deployment is configured. To deploy, build the frontend with `npm run 
 - A session is scoped to a browser tab using `sessionStorage` with a cookie fallback. It is anonymous and is not a unique-person identity.
 - Events are append-only. The application does not delete, merge, or automatically clean historical events.
 - Existing records created before `eventId` was added are not retroactively deduplicated. To investigate possible historical duplicates, export/read-only aggregate records grouped by `websiteId`, `sessionId`, `eventType`, canonical `pageUrl`, and a narrow timestamp/coordinate window; review candidates manually before any backup-backed, explicitly approved cleanup. Identical clicks can be legitimate, so these fields cannot prove duplication.
-- Heatmaps visualize document-relative normalized points over a live page preview. They are not pixel-perfect historical screenshots; page layout changes since a click can affect visual alignment.
+- Heatmaps visualize document-relative normalized points over a live page preview rendered at one selected viewport size. They are not historical screenshots; content, responsive styling, fonts, or layout changes since a click can still affect visual alignment. Viewport cohorts are kept separate, while different document heights within one viewport cohort are normalized to the current preview height.
 - Date aggregation and date presets use UTC; displayed timestamps use the browser's local timezone.
 - `npm run dev` requires a working MongoDB service. API startup fails rather than silently switching to an in-memory or mock database.

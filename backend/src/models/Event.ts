@@ -19,6 +19,10 @@ const eventSchema = new Schema(
     viewportHeight: { type: Number, min: 0 },
     documentWidth: { type: Number, min: 0 },
     documentHeight: { type: Number, min: 0 },
+    scrollX: { type: Number, min: 0 },
+    scrollY: { type: Number, min: 0 },
+    devicePixelRatio: { type: Number, min: 0 },
+    coordinateMode: { type: String, enum: ['document'] },
     pageTitle: { type: String, maxlength: 200 },
     elementTag: { type: String, maxlength: 50 },
     elementId: { type: String, maxlength: 200 },
@@ -30,6 +34,7 @@ const eventSchema = new Schema(
 
 eventSchema.index({ websiteId: 1, sessionId: 1, timestamp: 1 });
 eventSchema.index({ websiteId: 1, pageUrl: 1, eventType: 1, timestamp: -1 });
+eventSchema.index({ websiteId: 1, pageUrl: 1, eventType: 1, viewportWidth: 1, viewportHeight: 1, timestamp: -1 });
 eventSchema.index({ websiteId: 1, eventType: 1, timestamp: -1 });
 eventSchema.index(
   { websiteId: 1, eventId: 1 },

@@ -117,4 +117,69 @@ describe('analytics API routes', () => {
     expect(response.body.success).toBe(false);
     expect(response.body.error).toBe('Invalid request');
   });
+
+  it('requires viewport width and height to be supplied together for heatmap filtering', async () => {
+    await request(app)
+      .get(`/api/heatmap?websiteId=demo-store&pageUrl=${encodeURIComponent('http://localhost:5173/store')}&viewportWidth=1280`)
+      .expect(400);
+    expect(services.getHeatmap).not.toHaveBeenCalled();
+  });
+
+  it('validates and persists document-relative click metadata', async () => {
+    services.createEvent.mockResolvedValue({ eventId: 'event-click' });
+    await request(app)
+      .post('/api/events')
+      .send({
+        eventId: 'a7970193-765d-4876-9ee0-9cd81e9d02d1',
+        websiteId: 'demo-store',
+        sessionId: 'session-1',
+        eventType: 'click',
+        pageUrl: 'http://localhost:5173/store',
+        timestamp: '2026-10-12T08:30:00.000Z',
+        clickX: 50,
+        clickY: 80,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        documentWidth: 1280,
+        documentHeight: 1440,
+        scrollX: 0,
+        scrollY: 60,
+        devicePixelRatio: 2,
+        coordinateMode: 'document',
+      })
+      .expect(201);
+
+    expect(services.createEvent).toHaveBeenCalledWith(expect.objectContaining({
+      clickX: 50,
+      clickY: 80,
+      viewportWidth: 1280,
+      documentWidth: 1280,
+      scrollY: 60,
+      coordinateMode: 'document',
+    }));
+  });
+
+  it('rejects clicks outside the declared document dimensions', async () => {
+    await request(app)
+      .post('/api/events')
+      .send({
+        eventId: 'a7970193-765d-4876-9ee0-9cd81e9d02d1',
+        websiteId: 'demo-store',
+        sessionId: 'session-1',
+        eventType: 'click',
+        pageUrl: 'http://localhost:5173/store',
+        timestamp: '2026-10-12T08:30:00.000Z',
+        clickX: 500,
+        clickY: 80,
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        documentWidth: 400,
+        documentHeight: 1440,
+        scrollX: 0,
+        scrollY: 60,
+        coordinateMode: 'document',
+      })
+      .expect(400);
+    expect(services.createEvent).not.toHaveBeenCalled();
+  });
 });

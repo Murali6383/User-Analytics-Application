@@ -112,7 +112,6 @@
       listenerAttached: false,
       historyPatched: false,
       lastPageUrl: null,
-      lastPageTrackedAt: 0,
     };
 
     function isIgnoredPage() {
@@ -149,12 +148,16 @@
           document.documentElement.clientHeight,
           window.innerHeight || 0,
         );
-        payload.clickX = Math.max(0, Math.round(extra.pageX));
-        payload.clickY = Math.max(0, Math.round(extra.pageY));
+        payload.clickX = Math.max(0, extra.pageX);
+        payload.clickY = Math.max(0, extra.pageY);
         payload.viewportWidth = Math.max(0, window.innerWidth || 0);
         payload.viewportHeight = Math.max(0, window.innerHeight || 0);
         payload.documentWidth = documentWidth;
         payload.documentHeight = documentHeight;
+        payload.scrollX = Math.max(0, window.scrollX || 0);
+        payload.scrollY = Math.max(0, window.scrollY || 0);
+        payload.devicePixelRatio = Math.max(1, window.devicePixelRatio || 1);
+        payload.coordinateMode = 'document';
         payload.elementTag = extra.elementTag;
       }
 
@@ -200,13 +203,11 @@
 
       if (isIgnoredPage()) {
         state.lastPageUrl = pageUrl;
-        state.lastPageTrackedAt = Date.now();
         return;
       }
 
-      if (pageUrl === state.lastPageUrl && Date.now() - state.lastPageTrackedAt < 100) return;
+      if (pageUrl === state.lastPageUrl) return;
       state.lastPageUrl = pageUrl;
-      state.lastPageTrackedAt = Date.now();
       touchSession();
       void sendPayload(buildEventPayload('page_view'));
     }

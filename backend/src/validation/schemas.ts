@@ -27,14 +27,31 @@ export const trackingEventSchema = z
     viewportHeight: z.number().finite().nonnegative().optional(),
     documentWidth: z.number().finite().nonnegative().optional(),
     documentHeight: z.number().finite().nonnegative().optional(),
+    scrollX: z.number().finite().nonnegative().optional(),
+    scrollY: z.number().finite().nonnegative().optional(),
+    devicePixelRatio: z.number().finite().positive().optional(),
+    coordinateMode: z.enum(['document']).optional(),
     pageTitle: z.string().trim().max(200).optional(),
     elementTag: z.string().trim().max(50).optional(),
     elementId: z.string().trim().max(200).optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.eventType === 'click' && (value.clickX === undefined || value.clickY === undefined)) {
-      ctx.addIssue({ code: 'custom', path: ['clickX'], message: 'clickX is required for click events' });
-      ctx.addIssue({ code: 'custom', path: ['clickY'], message: 'clickY is required for click events' });
+    if (value.eventType === 'click') {
+      if (value.clickX === undefined || value.clickY === undefined) {
+        ctx.addIssue({ code: 'custom', path: ['clickX'], message: 'clickX and clickY are required for click events' });
+      }
+      if (!value.viewportWidth || !value.viewportHeight || !value.documentWidth || !value.documentHeight) {
+        ctx.addIssue({ code: 'custom', path: ['viewportWidth'], message: 'Positive viewport and document dimensions are required for click events' });
+      }
+      if (value.scrollX === undefined || value.scrollY === undefined || !value.coordinateMode) {
+        ctx.addIssue({ code: 'custom', path: ['coordinateMode'], message: 'Document coordinates and scroll offsets are required for click events' });
+      }
+      if (value.clickX !== undefined && value.documentWidth !== undefined && value.clickX > value.documentWidth) {
+        ctx.addIssue({ code: 'custom', path: ['clickX'], message: 'clickX must be within documentWidth' });
+      }
+      if (value.clickY !== undefined && value.documentHeight !== undefined && value.clickY > value.documentHeight) {
+        ctx.addIssue({ code: 'custom', path: ['clickY'], message: 'clickY must be within documentHeight' });
+      }
     }
   });
 
@@ -64,4 +81,15 @@ export const heatmapQuerySchema = analyticsFilterObject.extend({
   websiteId: z.string().trim().min(1),
   pageUrl: urlSchema,
   limit: z.coerce.number().int().min(1).max(200).optional().default(200),
-}).superRefine(validateDateRange);
+  viewportWidth: z.coerce.number().int().positive().optional(),
+  viewportHeight: z.coerce.number().int().positive().optional(),
+}).superRefine((value, ctx) => {
+  validateDateRange(value, ctx);
+  if ((value.viewportWidth === undefined) !== (value.viewportHeight === undefined)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['viewportWidth'],
+      message: 'viewportWidth and viewportHeight must be provided together',
+    });
+  }
+});

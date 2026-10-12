@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { API_BASE, apiFetch } from './lib/api';
-import { getHeatmapPosition, validHeatmapClicks, type HeatmapClick } from './lib/heatmap';
+import { getHeatmapPosition, getPreviewScale, validHeatmapClicks, type HeatmapClick } from './lib/heatmap';
 import { products } from './data/products';
 
 type TrendPoint = { date: string; totalEvents: number; pageViews: number; clicks: number };
@@ -165,42 +165,96 @@ export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; ra
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [total, setTotal] = useState(0);
+  const [sessionCount, setSessionCount] = useState(0);
+  const [invalidCoordinates, setInvalidCoordinates] = useState(0);
+  const [viewportBreakdown, setViewportBreakdown] = useState<Array<{ viewportWidth: number; viewportHeight: number; clicks: number; sessions: number }>>([]);
+  const [selectedViewport, setSelectedViewport] = useState<{ viewportWidth: number; viewportHeight: number } | null>(null);
   const [retry, setRetry] = useState(0);
   const [previewHeight, setPreviewHeight] = useState(900);
   const [previewError, setPreviewError] = useState('');
+  const [previewWidth, setPreviewWidth] = useState(0);
+  const previewContainer = useRef<HTMLDivElement | null>(null);
   const previewObserver = useRef<ResizeObserver | null>(null);
+  const skipAutomaticViewportReload = useRef('');
   const previewUrl = new URL(pageUrl);
   previewUrl.searchParams.set('insighttrackPreview', '1');
   const validPoints = validHeatmapClicks(points);
+  const viewportKey = selectedViewport
+    ? `${selectedViewport.viewportWidth}x${selectedViewport.viewportHeight}`
+    : '';
+  const loadRequestKey = `${pageUrl}|${range}|${refreshToken}|${retry}|${viewportKey}`;
+  const previewScale = selectedViewport
+    ? getPreviewScale(selectedViewport.viewportWidth, previewWidth)
+    : 1;
 
   useEffect(() => {
+    if (skipAutomaticViewportReload.current === loadRequestKey) {
+      skipAutomaticViewportReload.current = '';
+      return;
+    }
     let active = true;
     const load = async () => {
       setLoading(true);
       setError('');
       try {
         const rangeQuery = dateRangeQuery(range);
-        const data = await apiFetch<{ data: typeof points; total: number }>(`/heatmap?websiteId=demo-store&pageUrl=${encodeURIComponent(pageUrl)}&limit=40${rangeQuery ? `&${rangeQuery}` : ''}`);
+        const viewportQuery = selectedViewport
+          ? `&viewportWidth=${selectedViewport.viewportWidth}&viewportHeight=${selectedViewport.viewportHeight}`
+          : '';
+        const data = await apiFetch<{
+          data: typeof points;
+          total: number;
+          sessions: number;
+          invalidCoordinates: number;
+          viewportBreakdown: typeof viewportBreakdown;
+          selectedViewport: typeof selectedViewport;
+        }>(`/heatmap?websiteId=demo-store&pageUrl=${encodeURIComponent(pageUrl)}&limit=200${rangeQuery ? `&${rangeQuery}` : ''}${viewportQuery}`);
         if (!active) return;
         setPoints(data.data);
         setTotal(data.total);
+        setSessionCount(data.sessions);
+        setInvalidCoordinates(data.invalidCoordinates);
+        setViewportBreakdown(data.viewportBreakdown);
+        if (data.selectedViewport) {
+          if (!selectedViewport) {
+            skipAutomaticViewportReload.current = `${pageUrl}|${range}|${refreshToken}|${retry}|${data.selectedViewport.viewportWidth}x${data.selectedViewport.viewportHeight}`;
+          }
+          setSelectedViewport(data.selectedViewport);
+        }
       } catch (loadError) {
         if (!active) return;
         setError(errorMessage(loadError));
         setPoints([]);
+        setTotal(0);
+        setSessionCount(0);
+        setInvalidCoordinates(0);
+        setViewportBreakdown([]);
       }
       if (active) setLoading(false);
     };
 
     void load();
     return () => { active = false; };
-  }, [pageUrl, refreshToken, range, retry]);
+  }, [loadRequestKey]);
 
   useEffect(() => {
     setPreviewHeight(900);
     setPreviewError('');
+    setSelectedViewport(null);
+    setViewportBreakdown([]);
     return () => previewObserver.current?.disconnect();
   }, [pageUrl]);
+
+  useEffect(() => {
+    const container = previewContainer.current;
+    if (!container) return;
+    const measureWidth = () => setPreviewWidth(container.clientWidth);
+    measureWidth();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measureWidth);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   return (
     <div className="card">
@@ -215,7 +269,15 @@ export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; ra
           </button>
           <select
             value={pageUrl}
-            onChange={(event) => setPageUrl(event.target.value)}
+            onChange={(event) => {
+              setPageUrl(event.target.value);
+              setPoints([]);
+              setTotal(0);
+              setSessionCount(0);
+              setInvalidCoordinates(0);
+              setSelectedViewport(null);
+              setViewportBreakdown([]);
+            }}
             className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
             aria-label="Heatmap page"
           >
@@ -223,44 +285,98 @@ export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; ra
             <option value={`${window.location.origin}/store`}>Home</option>
             <option value={`${window.location.origin}/store/cart`}>Cart</option>
           </select>
+          <select
+            value={viewportKey}
+            onChange={(event) => {
+              const [width, height] = event.target.value.split('x').map(Number);
+              setSelectedViewport(width && height ? { viewportWidth: width, viewportHeight: height } : null);
+            }}
+            className="max-w-56 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
+            aria-label="Heatmap viewport"
+            disabled={viewportBreakdown.length === 0}
+          >
+            {viewportBreakdown.length === 0 && <option value="">No viewport data</option>}
+            {viewportBreakdown.map((viewport) => (
+              <option
+                key={`${viewport.viewportWidth}x${viewport.viewportHeight}`}
+                value={`${viewport.viewportWidth}x${viewport.viewportHeight}`}
+              >
+                {viewport.viewportWidth} × {viewport.viewportHeight} ({formatNumber(viewport.clicks)} clicks)
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
-      <div className="relative h-72 overflow-auto rounded-2xl border border-slate-200 bg-slate-100">
-        <iframe
-          key={pageUrl}
-          src={previewUrl.href}
-          title={`Page preview: ${new URL(pageUrl).pathname}`}
-          className="pointer-events-none block w-full border-0"
-          style={{ height: previewHeight }}
-          aria-hidden="true"
-          tabIndex={-1}
-          onLoad={(event) => {
-            try {
-              const previewDocument = event.currentTarget.contentDocument;
-              if (previewDocument) {
-                const measureHeight = () => setPreviewHeight(Math.max(
-                  previewDocument.documentElement.scrollHeight,
-                  previewDocument.body?.scrollHeight || 0,
-                  288,
-                ));
-                measureHeight();
-                previewObserver.current?.disconnect();
-                if (typeof ResizeObserver !== 'undefined') {
-                  previewObserver.current = new ResizeObserver(measureHeight);
-                  previewObserver.current.observe(previewDocument.documentElement);
-                  if (previewDocument.body) previewObserver.current.observe(previewDocument.body);
-                }
-              } else {
-                setPreviewError('The selected page preview is unavailable.');
-              }
-            } catch (previewError) {
-              setPreviewError('The selected page preview could not be measured.');
-              console.error('Could not measure the selected heatmap page preview:', previewError);
-            }
+      <div ref={previewContainer} className="relative h-72 overflow-auto rounded-2xl border border-slate-200 bg-slate-100">
+        <div
+          style={{
+            width: selectedViewport ? selectedViewport.viewportWidth * previewScale : '100%',
+            height: previewHeight * previewScale,
           }}
-          onError={() => setPreviewError('The selected page preview could not be loaded.')}
-        />
+        >
+          <div
+            style={{
+              width: selectedViewport?.viewportWidth || '100%',
+              height: previewHeight,
+              transform: `scale(${previewScale})`,
+              transformOrigin: 'top left',
+              position: 'relative',
+            }}
+          >
+            <iframe
+              key={`${pageUrl}-${viewportKey}`}
+              src={previewUrl.href}
+              title={`Full-page preview at ${selectedViewport?.viewportWidth || 'current'}px viewport width: ${new URL(pageUrl).pathname}`}
+              className="pointer-events-none block border-0"
+              style={{ height: previewHeight, width: selectedViewport?.viewportWidth || '100%' }}
+              aria-hidden="true"
+              tabIndex={-1}
+              onLoad={(event) => {
+                try {
+                  const previewDocument = event.currentTarget.contentDocument;
+                  if (previewDocument) {
+                    const measureHeight = () => setPreviewHeight(Math.max(
+                      previewDocument.documentElement.scrollHeight,
+                      previewDocument.body?.scrollHeight || 0,
+                      288,
+                    ));
+                    measureHeight();
+                    previewObserver.current?.disconnect();
+                    if (typeof ResizeObserver !== 'undefined') {
+                      previewObserver.current = new ResizeObserver(measureHeight);
+                      previewObserver.current.observe(previewDocument.documentElement);
+                      if (previewDocument.body) previewObserver.current.observe(previewDocument.body);
+                    }
+                  } else {
+                    setPreviewError('The selected page preview is unavailable.');
+                  }
+                } catch (previewError) {
+                  setPreviewError('The selected page preview could not be measured.');
+                  console.error('Could not measure the selected heatmap page preview:', previewError);
+                }
+              }}
+              onError={() => setPreviewError('The selected page preview could not be loaded.')}
+            />
+            {validPoints.length > 0 && (
+              <div className="pointer-events-none absolute left-0 top-0 z-10 w-full" style={{ height: previewHeight }}>
+                {validPoints.map((point, index) => {
+                  const position = getHeatmapPosition(point);
+                  if (!position) return null;
+
+                  return (
+                    <span
+                      key={`${point._id}-${index}`}
+                      className="absolute h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-brand-500/80 shadow-lg shadow-brand-500/30"
+                      style={position}
+                      title={`document click at ${point.clickX}, ${point.clickY}px`}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
         {loading ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/70 text-sm text-slate-500">Loading click data…</div>
         ) : error ? (
@@ -270,31 +386,27 @@ export function HeatmapPanel({ refreshToken, range }: { refreshToken: number; ra
           </div>
         ) : validPoints.length === 0 ? (
           <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-lg bg-white/90 px-3 py-2 text-sm text-slate-600 shadow">
-            {total > 0 ? 'Click events were found, but none have valid coordinates.' : 'No clicks yet for this page.'}
+            {total > 0 ? 'Click events were found, but none have valid coordinates.' : 'No valid clicks yet for this page and viewport.'}
           </div>
-        ) : (
-          <div className="pointer-events-none absolute left-0 top-0 z-10 w-full" style={{ height: previewHeight }}>
-            {validPoints.map((point, index) => {
-              const position = getHeatmapPosition(point);
-              if (!position) return null;
-
-              return (
-                <span
-                  key={`${point._id}-${index}`}
-                  className="absolute h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-brand-500/80 shadow-lg shadow-brand-500/30"
-                  style={position}
-                  title={`click at ${point.clickX}, ${point.clickY}`}
-                />
-              );
-            })}
-          </div>
-        )}
+        ) : null}
         {previewError && !loading && !error && (
           <div role="status" className="pointer-events-none absolute bottom-2 left-2 z-20 rounded-lg bg-white/90 px-3 py-2 text-xs text-amber-800 shadow">
             {previewError}
           </div>
         )}
       </div>
+      {!loading && !error && (
+        <div className="mt-3 space-y-1 text-xs text-slate-500">
+          <p>{formatNumber(total)} clicks across {formatNumber(sessionCount)} sessions · document coordinates · {selectedViewport ? `${selectedViewport.viewportWidth} × ${selectedViewport.viewportHeight} CSS-pixel viewport` : 'viewport not available'}</p>
+          {validPoints.length < total && (
+            <p>Showing the {formatNumber(validPoints.length)} most recent valid click points from this filtered total.</p>
+          )}
+          <p className="break-all">Selected URL: {pageUrl}</p>
+          {invalidCoordinates > 0 && (
+            <p role="status" className="text-amber-700">{formatNumber(invalidCoordinates)} click events excluded because their coordinates or viewport metadata are invalid.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

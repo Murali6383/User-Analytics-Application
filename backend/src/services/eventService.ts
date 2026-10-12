@@ -17,6 +17,10 @@ type EventPayload = {
   viewportHeight?: number;
   documentWidth?: number;
   documentHeight?: number;
+  scrollX?: number;
+  scrollY?: number;
+  devicePixelRatio?: number;
+  coordinateMode?: 'document';
   pageTitle?: string;
   elementTag?: string;
   elementId?: string;
@@ -197,45 +201,144 @@ export async function getPageAnalytics({ websiteId, from, to }: { websiteId?: st
   return pages;
 }
 
-export async function getHeatmap({ websiteId, pageUrl, from, to, limit = 200 }: { websiteId: string; pageUrl: string; from?: string; to?: string; limit?: number }) {
+function heatmapCoordinatesValidExpression() {
+  const width = { $max: [{ $ifNull: ['$documentWidth', 0] }, { $ifNull: ['$viewportWidth', 0] }] };
+  const height = { $max: [{ $ifNull: ['$documentHeight', 0] }, { $ifNull: ['$viewportHeight', 0] }] };
+  return {
+    $and: [
+      { $isNumber: '$clickX' },
+      { $isNumber: '$clickY' },
+      { $isNumber: '$viewportWidth' },
+      { $isNumber: '$viewportHeight' },
+      { $gte: ['$clickX', 0] },
+      { $gte: ['$clickY', 0] },
+      { $gt: ['$viewportWidth', 0] },
+      { $gt: ['$viewportHeight', 0] },
+      { $gt: [width, 0] },
+      { $gt: [height, 0] },
+      { $lte: ['$clickX', width] },
+      { $lte: ['$clickY', height] },
+    ],
+  };
+}
+
+export async function getHeatmap({ websiteId, pageUrl, from, to, limit = 200, viewportWidth, viewportHeight }: {
+  websiteId: string;
+  pageUrl: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+}) {
   const match: Record<string, any> = { websiteId, pageUrl: pageUrlMatch(pageUrl), eventType: 'click' };
   const dateMatch = buildDateMatch({ from, to });
   Object.assign(match, dateMatch);
 
-  const total = await EventModel.countDocuments(match);
-  const events = await EventModel.find(match)
-    .sort({ timestamp: -1 })
-    .limit(limit)
-    .lean();
+  const [diagnostics] = await EventModel.aggregate([
+    { $match: match },
+    { $addFields: { _coordinateValid: heatmapCoordinatesValidExpression() } },
+    {
+      $facet: {
+        viewportBreakdown: [
+          { $match: { _coordinateValid: true } },
+          {
+            $group: {
+              _id: { width: '$viewportWidth', height: '$viewportHeight', sessionId: '$sessionId' },
+              clicks: { $sum: 1 },
+            },
+          },
+          {
+            $group: {
+              _id: { width: '$_id.width', height: '$_id.height' },
+              clicks: { $sum: '$clicks' },
+              sessions: { $sum: 1 },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              viewportWidth: '$_id.width',
+              viewportHeight: '$_id.height',
+              clicks: 1,
+              sessions: 1,
+            },
+          },
+          { $sort: { clicks: -1 as const, viewportWidth: 1 as const, viewportHeight: 1 as const } },
+        ],
+        invalidCoordinates: [
+          { $match: { _coordinateValid: { $ne: true } } },
+          { $count: 'count' },
+        ],
+      },
+    },
+  ]);
 
-  const normalized = events.flatMap((event: any) => {
-    const clickX = Number(event.clickX);
-    const clickY = Number(event.clickY);
+  const viewportBreakdown = diagnostics?.viewportBreakdown || [];
+  const selectedViewport = viewportWidth !== undefined && viewportHeight !== undefined
+    ? { viewportWidth, viewportHeight }
+    : viewportBreakdown[0]
+      ? { viewportWidth: viewportBreakdown[0].viewportWidth, viewportHeight: viewportBreakdown[0].viewportHeight }
+      : null;
+
+  if (!selectedViewport) {
+    return {
+      data: [],
+      total: 0,
+      sessions: 0,
+      invalidCoordinates: diagnostics?.invalidCoordinates[0]?.count || 0,
+      viewportBreakdown,
+      selectedViewport: null,
+    };
+  }
+
+  const selectedMatch = {
+    ...match,
+    viewportWidth: selectedViewport.viewportWidth,
+    viewportHeight: selectedViewport.viewportHeight,
+    $expr: heatmapCoordinatesValidExpression(),
+  };
+  const [selected] = await EventModel.aggregate([
+    { $match: selectedMatch },
+    {
+      $facet: {
+        summary: [
+          { $count: 'total' },
+        ],
+        sessions: [
+          { $group: { _id: '$sessionId' } },
+          { $count: 'count' },
+        ],
+        events: [
+          { $sort: { timestamp: -1 as const, _id: -1 as const } },
+          { $limit: limit },
+          { $project: { _coordinateValid: 0 } },
+        ],
+      },
+    },
+  ]);
+  const summary = {
+    total: selected?.summary[0]?.total || 0,
+    sessions: selected?.sessions[0]?.count || 0,
+  };
+  const normalized = (selected?.events || []).map((event: any) => {
     const documentWidth = Math.max(Number(event.documentWidth || 0), Number(event.viewportWidth || 0));
     const documentHeight = Math.max(Number(event.documentHeight || 0), Number(event.viewportHeight || 0));
-    if (
-      !Number.isFinite(clickX)
-      || clickX < 0
-      || !Number.isFinite(clickY)
-      || clickY < 0
-      || !Number.isFinite(documentWidth)
-      || documentWidth <= 0
-      || !Number.isFinite(documentHeight)
-      || documentHeight <= 0
-    ) {
-      return [];
-    }
-
-    return [{
+    return {
       ...event,
-      clickX,
-      clickY,
-      normalizedX: Math.min(100, Math.max(0, (clickX / documentWidth) * 100)),
-      normalizedY: Math.min(100, Math.max(0, (clickY / documentHeight) * 100)),
-    }];
+      normalizedX: (Number(event.clickX) / documentWidth) * 100,
+      normalizedY: (Number(event.clickY) / documentHeight) * 100,
+    };
   });
 
-  return { data: normalized, total };
+  return {
+    data: normalized,
+    total: summary.total,
+    sessions: summary.sessions,
+    invalidCoordinates: diagnostics?.invalidCoordinates[0]?.count || 0,
+    viewportBreakdown,
+    selectedViewport,
+  };
 }
 
 export async function getOverview({ websiteId, from, to }: { websiteId?: string; from?: string; to?: string }) {

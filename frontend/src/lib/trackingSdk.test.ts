@@ -52,14 +52,22 @@ describe('InsightTrack browser SDK', () => {
       pageUrl: `${window.location.origin}/store/products`,
     });
 
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 });
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
+    Object.defineProperty(window, 'scrollX', { configurable: true, value: 0 });
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 120 });
     const button = document.createElement('button');
     button.textContent = 'Tracked action';
     document.body.appendChild(button);
-    button.dispatchEvent(new MouseEvent('click', {
+    const click = new MouseEvent('click', {
       bubbles: true,
       clientX: 24,
       clientY: 36,
-    }));
+    });
+    Object.defineProperty(click, 'pageX', { value: 24 });
+    Object.defineProperty(click, 'pageY', { value: 156 });
+    button.dispatchEvent(click);
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(JSON.parse(fetchMock.mock.calls[2][1].body as string)).toMatchObject({
@@ -68,12 +76,16 @@ describe('InsightTrack browser SDK', () => {
       eventType: 'click',
       pageUrl: `${window.location.origin}/store/products`,
       clickX: 24,
-      clickY: 36,
+      clickY: 156,
       timestamp: expect.any(String),
       viewportWidth: expect.any(Number),
       viewportHeight: expect.any(Number),
       documentWidth: expect.any(Number),
       documentHeight: expect.any(Number),
+      scrollX: 0,
+      scrollY: 120,
+      devicePixelRatio: 2,
+      coordinateMode: 'document',
     });
 
     window.history.pushState({}, '', '/dashboard/sessions');

@@ -53,6 +53,19 @@ describe('event analytics service', () => {
     });
   });
 
+  it('applies inclusive UTC date boundaries to persisted analytics queries', async () => {
+    eventModel.aggregate.mockResolvedValueOnce([]);
+    const from = '2026-10-01T00:00:00.000Z';
+    const to = '2026-10-07T23:59:59.999Z';
+
+    await getOverview({ websiteId: 'demo-store', from, to });
+
+    expect(eventModel.aggregate.mock.calls[0][0][0].$match).toEqual({
+      websiteId: 'demo-store',
+      timestamp: { $gte: new Date(from), $lte: new Date(to) },
+    });
+  });
+
   it('groups and sorts session summaries with bounded pagination and safe search', async () => {
     eventModel.aggregate
       .mockResolvedValueOnce([{ sessionId: 'session-1', totalEvents: 3 }])
@@ -98,27 +111,26 @@ describe('event analytics service', () => {
   });
 
   it('limits heatmaps to the exact selected page and click events, skipping invalid coordinates', async () => {
-    const chain = queryChain([
-      {
+    eventModel.aggregate
+      .mockResolvedValueOnce([{
+        viewportBreakdown: [{ viewportWidth: 1440, viewportHeight: 900, clicks: 2, sessions: 1 }],
+        invalidCoordinates: [{ count: 1 }],
+      }])
+      .mockResolvedValueOnce([{
+        summary: [{ total: 2, sessions: 1 }],
+        sessions: [{ count: 1 }],
+        events: [{
         _id: 'click-1',
         eventType: 'click',
         pageUrl: 'https://shop.test/products/?variant=blue',
-        clickX: 500,
-        clickY: 900,
-        documentWidth: 400,
-        documentHeight: 800,
-      },
-      {
-        _id: 'click-invalid',
-        eventType: 'click',
-        clickX: undefined,
-        clickY: 100,
-        documentWidth: 400,
-        documentHeight: 800,
-      },
-    ]);
-    eventModel.countDocuments.mockResolvedValue(3);
-    eventModel.find.mockReturnValue(chain);
+        clickX: 720,
+        clickY: 450,
+        viewportWidth: 1440,
+        viewportHeight: 900,
+        documentWidth: 1440,
+        documentHeight: 900,
+      }],
+      }]);
 
     const result = await getHeatmap({
       websiteId: 'demo-store',
@@ -126,26 +138,42 @@ describe('event analytics service', () => {
       limit: 40,
     });
 
-    expect(eventModel.find).toHaveBeenCalledWith({
+    expect(eventModel.aggregate.mock.calls[0][0][0].$match).toEqual({
       websiteId: 'demo-store',
       pageUrl: { $in: ['https://shop.test/products?variant=blue', 'https://shop.test/products/?variant=blue'] },
       eventType: 'click',
     });
-    expect(result.total).toBe(3);
+    expect(eventModel.aggregate.mock.calls[1][0][0].$match).toMatchObject({
+      viewportWidth: 1440,
+      viewportHeight: 900,
+    });
+    expect(result.total).toBe(2);
+    expect(result.sessions).toBe(1);
+    expect(result.invalidCoordinates).toBe(1);
+    expect(result.selectedViewport).toEqual({ viewportWidth: 1440, viewportHeight: 900 });
+    expect(result.viewportBreakdown).toHaveLength(1);
     expect(result.data).toHaveLength(1);
-    expect(result.data[0]).toMatchObject({ normalizedX: 100, normalizedY: 100 });
+    expect(result.data[0]).toMatchObject({ normalizedX: 50, normalizedY: 50 });
   });
 
   it('returns an empty point list when the selected page has no stored clicks', async () => {
-    const chain = queryChain([]);
-    eventModel.countDocuments.mockResolvedValue(0);
-    eventModel.find.mockReturnValue(chain);
+    eventModel.aggregate.mockResolvedValueOnce([{
+      viewportBreakdown: [],
+      invalidCoordinates: [],
+    }]);
 
     await expect(getHeatmap({
       websiteId: 'demo-store',
       pageUrl: 'https://shop.test/cart',
       limit: 40,
-    })).resolves.toEqual({ data: [], total: 0 });
+    })).resolves.toMatchObject({
+      data: [],
+      total: 0,
+      sessions: 0,
+      invalidCoordinates: 0,
+      viewportBreakdown: [],
+      selectedViewport: null,
+    });
   });
 
   it('persists the event id with a canonical URL and parsed timestamp', async () => {
@@ -158,13 +186,13 @@ describe('event analytics service', () => {
       websiteId: 'demo-store',
       sessionId: 'session-1',
       eventType: 'page_view',
-      pageUrl: 'https://shop.test/products/#details',
+      pageUrl: 'https://shop.test/products/?variant=blue&color=red#details',
       timestamp,
     });
 
     expect(eventModel.create).toHaveBeenCalledWith(expect.objectContaining({
       eventId: 'event-1',
-      pageUrl: 'https://shop.test/products',
+      pageUrl: 'https://shop.test/products?variant=blue&color=red',
       timestamp: new Date(timestamp),
     }));
     expect(toObject).toHaveBeenCalledOnce();

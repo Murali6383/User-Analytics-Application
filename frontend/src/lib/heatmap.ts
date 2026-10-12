@@ -15,8 +15,14 @@ export type HeatmapPosition = {
   top: string;
 };
 
-function clampPercentage(value: number) {
-  return Math.min(100, Math.max(0, value));
+export function getPreviewScale(viewportWidth: number, containerWidth: number) {
+  if (
+    !Number.isFinite(viewportWidth)
+    || viewportWidth <= 0
+    || !Number.isFinite(containerWidth)
+    || containerWidth <= 0
+  ) return 1;
+  return Math.min(1, containerWidth / viewportWidth);
 }
 
 export function getHeatmapPosition(point: HeatmapClick): HeatmapPosition | null {
@@ -32,8 +38,8 @@ export function getHeatmapPosition(point: HeatmapClick): HeatmapPosition | null 
     return null;
   }
 
-  const width = point.documentWidth || point.viewportWidth;
-  const height = point.documentHeight || point.viewportHeight;
+  const width = Math.max(point.documentWidth || 0, point.viewportWidth || 0);
+  const height = Math.max(point.documentHeight || 0, point.viewportHeight || 0);
   if (
     typeof width !== 'number'
     || !Number.isFinite(width)
@@ -45,16 +51,22 @@ export function getHeatmapPosition(point: HeatmapClick): HeatmapPosition | null 
     return null;
   }
 
-  const x = typeof point.normalizedX === 'number' && Number.isFinite(point.normalizedX)
-    ? point.normalizedX
-    : (clickX / width) * 100;
-  const y = typeof point.normalizedY === 'number' && Number.isFinite(point.normalizedY)
-    ? point.normalizedY
-    : (clickY / height) * 100;
+  if (clickX > width || clickY > height) return null;
+
+  const x = (clickX / width) * 100;
+  const y = (clickY / height) * 100;
+  if (
+    !Number.isFinite(x)
+    || !Number.isFinite(y)
+    || x < 0
+    || x > 100
+    || y < 0
+    || y > 100
+  ) return null;
 
   return {
-    left: `${clampPercentage(x)}%`,
-    top: `${clampPercentage(y)}%`,
+    left: `${x}%`,
+    top: `${y}%`,
   };
 }
 
